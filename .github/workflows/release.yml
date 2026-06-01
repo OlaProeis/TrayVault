@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  release:
+    name: Build exe, zip, and MSI
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85
+
+      # rc.exe (Windows SDK) for build.rs icon embedding
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Parse version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)(?:[-+].*)?$') {
+            throw "Tag must look like v0.1.0 (got: $tag)"
+          }
+          $semver = $Matches[1]
+          "version=$semver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Set Cargo package version
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $toml = Get-Content Cargo.toml -Raw
+          $toml = $toml -replace '(?m)^version = ".*"$', "version = `"$v`""
+          Set-Content Cargo.toml $toml -NoNewline
+
+      - name: cargo build --release
+        run: cargo build --release --target $env:TARGET
+
+      - name: Stage distribution files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $exe = "target\$env:TARGET\release\trayvault.exe"
+          Copy-Item $exe dist\trayvault.exe
+          Copy-Item assets\icon.ico dist\icon.ico
+          Copy-Item LICENSE dist\LICENSE
+          Copy-Item NOTICES.md dist\NOTICES.md
+          Copy-Item assets\Roboto-LICENSE.txt dist\Roboto-LICENSE.txt
+          Copy-Item README.md dist\README.md
+
+      - name: Install WiX Toolset
+        run: choco install wixtoolset --no-progress -y
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          $env:Path = "$env:ProgramFiles(x86)\WiX Toolset v3.11\bin;$env:Path"
+          $version = "${{ steps.version.outputs.version }}"
+          $source = (Resolve-Path dist).Path
+          $project = "${{ github.workspace }}"
+          candle -nologo -arch x64 `
+            -dProductVersion=$version `
+            -dSourceDir=$source `
+            -dProjectDir=$project `
+            installer\trayvault.wxs `
+            -out installer\trayvault.wixobj
+          light -nologo -ext WixUIExtension `
+            installer\trayvault.wixobj `
+            -out dist\trayvault-windows-x86_64.msi
+
+      - name: Create zip archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\trayvault.exe, dist\icon.ico, dist\LICENSE, dist\NOTICES.md, dist\Roboto-LICENSE.txt, dist\README.md `
+            -DestinationPath dist\trayvault-windows-x86_64.zip -Force
+
+      - name: Upload GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: TrayVault ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/trayvault.exe
+            dist/trayvault-windows-x86_64.zip
+            dist/trayvault-windows-x86_64.msi

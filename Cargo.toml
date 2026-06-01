@@ -1,0 +1,25 @@
+[package]
+name = "trayvault"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A minimal, from-scratch clipboard history manager for Windows, written in pure Rust."
+license = "MIT"
+readme = "README.md"
+keywords = ["clipboard", "windows", "history", "clipboard-manager"]
+categories = ["gui", "os::windows-apis"]
+repository = "https://github.com/OlaProeis/TrayVault"
+
+# NOTE: TrayVault has zero third-party crate dependencies. UI rasterization
+# uses hand-rolled `src/ui/pixmap.rs`; glyph rasterization uses Win32 GDI in
+# `src/win32/glyph_raster.rs`. Everything else — windowing, clipboard, tray,
+# hotkey, autostart, storage, hashing, config — is hand-written std + raw
+# Win32 FFI.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

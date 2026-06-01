@@ -1,0 +1,3 @@
+// Application icon embedded in trayvault.exe (Explorer, taskbar, Alt+Tab).
+// Compiled by build.rs via the Windows SDK rc.exe.
+1 ICON "icon.ico"

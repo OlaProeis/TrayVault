@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TrayVault MSI (WiX 3.x). Built in release.yml after cargo build.
+
+  Variables (candle -d):
+    ProductVersion  — semver without leading v (e.g. 0.1.0)
+    SourceDir       — folder containing trayvault.exe and icon.ico
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="TrayVault"
+    Language="1033"
+    Version="$(var.ProductVersion)"
+    Manufacturer="TrayVault"
+    UpgradeCode="7C4E9A2B-1D3F-4E8A-9B6C-5A2F8E1D0C3B">
+
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perUser"
+      Description="TrayVault clipboard history manager for Windows"
+      Comments="TrayVault — Windows clipboard history manager" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of TrayVault is already installed."
+      AllowSameVersionUpgrades="yes" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <Icon Id="TrayVaultIcon.ico" SourceFile="$(var.SourceDir)\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="TrayVaultIcon.ico" />
+
+    <UIRef Id="WixUI_FeatureTree" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.ProjectDir)installer\license.rtf" />
+
+    <Feature Id="ProductFeature" Title="TrayVault" Level="1" Display="expand"
+             Description="Clipboard history manager (required).">
+      <ComponentGroupRef Id="ProductComponents" />
+      <Feature Id="AutostartFeature" Title="Start TrayVault when Windows starts" Level="1"
+               Description="Adds TrayVault to the Windows Run key so the app starts minimized to the tray after sign-in. You can change this later in TrayVault Settings.">
+        <ComponentRef Id="AutostartRegistry" />
+      </Feature>
+      <Feature Id="ShortcutsFeature" Title="Start Menu shortcut" Level="1"
+               Description="Creates a shortcut under Start Menu.">
+        <ComponentRef Id="StartMenuShortcut" />
+      </Feature>
+    </Feature>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="INSTALLFOLDER" Name="TrayVault" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="TrayVault" />
+      </Directory>
+    </Directory>
+
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="F3A8C2E1-9B4D-4F7A-8E2C-1D5B6A9F0E3C">
+        <File Id="TrayVaultExeFile" Source="$(var.SourceDir)\trayvault.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- HKCU Run key — same contract as src/win32/autostart.rs -->
+    <Component Id="AutostartRegistry" Guid="B2E7D4A9-6C1F-4E8B-A3D5-9F0E2C7B4A81" Directory="INSTALLFOLDER">
+      <RegistryValue
+        Root="HKCU"
+        Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+        Name="TrayVault"
+        Type="string"
+        Value="&quot;[#TrayVaultExeFile]&quot; --minimized"
+        KeyPath="yes" />
+    </Component>
+
+    <Component Id="StartMenuShortcut" Guid="C8F1A3E6-2D9B-4C7E-B5A1-0F4E8D2C6B93" Directory="ApplicationProgramsFolder">
+      <Shortcut
+        Id="ApplicationStartMenuShortcut"
+        Name="TrayVault"
+        Description="Clipboard history manager"
+        Target="[#TrayVaultExeFile]"
+        WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\TrayVault" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Product>
+</Wix>
