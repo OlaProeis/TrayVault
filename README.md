@@ -4,7 +4,12 @@ TrayVault is a clipboard history manager for Windows. It keeps a local history o
 
 The app runs in the background, opens from a global hotkey or the system tray, and stores everything under your user profile. No cloud sync, no accounts.
 
-![TrayVault main window — searchable clipboard history with text, rich text, and image entries](assets/screenshot.png)
+<p align="center">
+  <a href="assets/screenshot.png">
+    <img src="assets/screenshot-thumb.png" alt="TrayVault main window — searchable clipboard history with text, rich text, and image entries" width="480">
+  </a>
+</p>
+<p align="center"><sub>Click the screenshot to open the full-size image.</sub></p>
 
 Most clipboard tools ship a web view or a pile of frameworks. TrayVault is the opposite: a single native binary in Rust with **zero third-party crates** — only the Rust standard library and the Windows API. Windowing, UI, storage, hashing, and config are implemented in-tree instead of pulling in framework and utility crates.
 
