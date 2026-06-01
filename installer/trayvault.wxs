@@ -60,7 +60,15 @@
 
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
       <Component Id="MainExecutable" Guid="F3A8C2E1-9B4D-4F7A-8E2C-1D5B6A9F0E3C">
-        <File Id="TrayVaultExeFile" Source="$(var.SourceDir)\trayvault.exe" KeyPath="yes" />
+        <File Id="TrayVaultExeFile" Source="$(var.SourceDir)\trayvault.exe" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\TrayVault"
+          Name="InstallPath"
+          Type="string"
+          Value="[INSTALLFOLDER]"
+          KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
       </Component>
     </ComponentGroup>
 
@@ -71,7 +79,7 @@
         Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
         Name="TrayVault"
         Type="string"
-        Value="&quot;[#TrayVaultExeFile]&quot; --minimized"
+        Value="&quot;[INSTALLFOLDER]trayvault.exe&quot; --minimized"
         KeyPath="yes" />
     </Component>
 
@@ -80,10 +88,10 @@
         Id="ApplicationStartMenuShortcut"
         Name="TrayVault"
         Description="Clipboard history manager"
-        Target="[#TrayVaultExeFile]"
+        Target="[INSTALLFOLDER]trayvault.exe"
         WorkingDirectory="INSTALLFOLDER" />
       <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
-      <RegistryValue Root="HKCU" Key="Software\TrayVault" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      <RegistryValue Root="HKCU" Key="Software\TrayVault" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
     </Component>
   </Product>
 </Wix>
