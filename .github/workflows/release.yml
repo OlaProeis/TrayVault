@@ -67,7 +67,11 @@ jobs:
       - name: Build MSI
         shell: pwsh
         run: |
-          $env:Path = "$env:ProgramFiles(x86)\WiX Toolset v3.11\bin;$env:Path"
+          $wixBin = Get-ChildItem "${env:ProgramFiles(x86)}\WiX Toolset v3.*\bin" -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+          if (-not $wixBin) { throw "WiX Toolset bin directory not found" }
+          $env:Path = "$($wixBin.FullName);$env:Path"
           $version = "${{ steps.version.outputs.version }}"
           $source = (Resolve-Path dist).Path
           $project = "${{ github.workspace }}"

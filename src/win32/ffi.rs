@@ -37,6 +37,7 @@
 )]
 
 use core::ffi::c_void;
+use core::ptr::null_mut;
 
 // ---------------------------------------------------------------------------
 // Primitive type aliases
@@ -147,10 +148,19 @@ pub struct WINDOWPOS {
 
 /// [`WM_NCCALCSIZE`] layout when `wParam` is non-zero.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct NCCALCSIZE_PARAMS {
     pub rgrc: [RECT; 3],
     pub lppos: *mut WINDOWPOS,
+}
+
+impl Default for NCCALCSIZE_PARAMS {
+    fn default() -> Self {
+        Self {
+            rgrc: [RECT::default(); 3],
+            lppos: null_mut(),
+        }
+    }
 }
 
 /// [`DwmExtendFrameIntoClientArea`] margins.
@@ -290,7 +300,7 @@ pub struct ABCFLOAT {
 
 /// GDI [`GetGlyphOutlineW`] / monochrome bitmap header in outline buffers.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct BITMAP {
     pub bmType: LONG,
     pub bmWidth: LONG,
@@ -299,6 +309,20 @@ pub struct BITMAP {
     pub bmPlanes: WORD,
     pub bmBitsPixel: WORD,
     pub bmBits: LPVOID,
+}
+
+impl Default for BITMAP {
+    fn default() -> Self {
+        Self {
+            bmType: 0,
+            bmWidth: 0,
+            bmHeight: 0,
+            bmWidthBytes: 0,
+            bmPlanes: 0,
+            bmBitsPixel: 0,
+            bmBits: null_mut(),
+        }
+    }
 }
 
 /// Fixed-point value used by [`MAT2`] (`value` + `fract`/65536).
