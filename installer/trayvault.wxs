@@ -34,7 +34,7 @@
     <Property Id="ARPPRODUCTICON" Value="TrayVaultIcon.ico" />
 
     <UIRef Id="WixUI_FeatureTree" />
-    <WixVariable Id="WixUILicenseRtf" Value="$(var.ProjectDir)installer\license.rtf" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.ProjectDir)\installer\license.rtf" />
 
     <Feature Id="ProductFeature" Title="TrayVault" Level="1" Display="expand"
              Description="Clipboard history manager (required).">
