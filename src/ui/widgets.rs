@@ -178,12 +178,12 @@ pub fn column<'a>(
     children(ctx, x, y, width) + gap
 }
 
-pub fn divider<'a>(ctx: &mut UiContext<'a>, pixmap: &mut Pixmap, x: f32, y: f32, width: f32) {
+pub fn divider(ctx: &mut UiContext<'_>, pixmap: &mut Pixmap, x: f32, y: f32, width: f32) {
     fill_rect(pixmap, x, y, width, 1.0, rgba_to_color(ctx.theme.divider));
 }
 
-pub fn toggle_row<'a>(
-    ctx: &mut UiContext<'a>,
+pub fn toggle_row(
+    ctx: &mut UiContext<'_>,
     pixmap: &mut Pixmap,
     label: &str,
     x: f32,
@@ -237,8 +237,8 @@ pub fn toggle_row<'a>(
     (rect, clicked)
 }
 
-pub fn button<'a>(
-    ctx: &mut UiContext<'a>,
+pub fn button(
+    ctx: &mut UiContext<'_>,
     pixmap: &mut Pixmap,
     label: &str,
     x: f32,
@@ -293,8 +293,8 @@ pub fn button<'a>(
 }
 
 /// Square icon-only button (compact alternative to [`button`]).
-pub fn icon_button<'a>(
-    ctx: &mut UiContext<'a>,
+pub fn icon_button(
+    ctx: &mut UiContext<'_>,
     pixmap: &mut Pixmap,
     icon: &str,
     x: f32,
@@ -359,8 +359,8 @@ pub fn icon_button<'a>(
     (rect, clicked)
 }
 
-pub fn filter_chip<'a>(
-    ctx: &mut UiContext<'a>,
+pub fn filter_chip(
+    ctx: &mut UiContext<'_>,
     pixmap: &mut Pixmap,
     label: &str,
     x: f32,
@@ -409,8 +409,8 @@ pub fn filter_chip<'a>(
     (rect, clicked)
 }
 
-pub fn card<'a>(
-    ctx: &mut UiContext<'a>,
+pub fn card(
+    ctx: &mut UiContext<'_>,
     pixmap: &mut Pixmap,
     x: f32,
     y: f32,
@@ -467,8 +467,8 @@ pub struct InputBoxResult {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn input_box<'a>(
-    ctx: &mut UiContext<'a>,
+pub fn input_box(
+    ctx: &mut UiContext<'_>,
     pixmap: &mut Pixmap,
     value: &str,
     placeholder: &str,
@@ -585,8 +585,8 @@ impl ScrollableList {
     }
 }
 
-pub fn draw_context_menu<'a>(
-    ctx: &mut UiContext<'a>,
+pub fn draw_context_menu(
+    ctx: &mut UiContext<'_>,
     pixmap: &mut Pixmap,
     x: f32,
     y: f32,

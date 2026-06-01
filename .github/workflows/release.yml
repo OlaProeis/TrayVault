@@ -72,13 +72,12 @@ jobs:
             Select-Object -First 1
           if (-not $wixBin) { throw "WiX Toolset bin directory not found" }
           $env:Path = "$($wixBin.FullName);$env:Path"
-          $version = "${{ steps.version.outputs.version }}"
           $source = (Resolve-Path dist).Path
           $project = "${{ github.workspace }}"
           candle -nologo -arch x64 `
-            -dProductVersion=$version `
-            -dSourceDir=$source `
-            -dProjectDir=$project `
+            "-dProductVersion=${{ steps.version.outputs.version }}" `
+            "-dSourceDir=$source" `
+            "-dProjectDir=$project" `
             installer\trayvault.wxs `
             -out installer\trayvault.wixobj
           light -nologo -ext WixUIExtension `

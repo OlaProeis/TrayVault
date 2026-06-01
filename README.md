@@ -156,4 +156,4 @@ Settings live in `%LOCALAPPDATA%\TrayVault\config.toml`. History and image blobs
 
 TrayVault is [MIT licensed](LICENSE).
 
-The bundled UI font **Roboto Regular** (`assets/Roboto-Regular.ttf`) is copyright The Roboto Project Authors and licensed under the **Apache License 2.0** — free to use and redistribute with attribution; no fee required. See [NOTICES.md](NOTICES.md) and [assets/Roboto-LICENSE.txt](assets/Roboto-LICENSE.txt).
+The bundled UI font **Roboto Regular** (`assets/Roboto-Regular.ttf`) is copyright The Roboto Project Authors and licensed under the **Apache License 2.0**. See [NOTICES.md](NOTICES.md) and [assets/Roboto-LICENSE.txt](assets/Roboto-LICENSE.txt).

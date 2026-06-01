@@ -64,12 +64,10 @@ pub fn caret_at_click(
 
 /// Normalized `(start, end)` byte range; empty when `start == end`.
 pub fn selection_range(anchor: usize, caret: usize) -> (usize, usize) {
-    if anchor == caret {
-        (caret, caret)
-    } else if anchor < caret {
-        (anchor, caret)
-    } else {
-        (caret, anchor)
+    match anchor.cmp(&caret) {
+        core::cmp::Ordering::Equal => (caret, caret),
+        core::cmp::Ordering::Less => (anchor, caret),
+        core::cmp::Ordering::Greater => (caret, anchor),
     }
 }
 

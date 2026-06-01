@@ -428,8 +428,8 @@ fn draw_field_caret(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_toggle_setting<'a>(
-    ctx: &mut UiContext<'a>,
+fn draw_toggle_setting(
+    ctx: &mut UiContext<'_>,
     pixmap: &mut Pixmap,
     theme: &Theme,
     label: &str,
@@ -496,8 +496,8 @@ fn draw_toggle_setting<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_input_setting<'a>(
-    ctx: &mut UiContext<'a>,
+fn draw_input_setting(
+    ctx: &mut UiContext<'_>,
     pixmap: &mut Pixmap,
     theme: &Theme,
     label: &str,
