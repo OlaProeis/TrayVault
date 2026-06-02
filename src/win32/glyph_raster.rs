@@ -161,12 +161,22 @@ where
     f(&mut guard)
 }
 
+/// Map punctuation that bundled Roboto maps to a `.notdef`/tofu box (but still
+/// reports as “in font” via `GetGlyphIndicesW`) to ASCII hyphen-minus.
+fn rasterize_char(ch: char) -> char {
+    match ch {
+        '\u{2010}' | '\u{2011}' | '\u{2012}' => '-',
+        _ => ch,
+    }
+}
+
 /// Rasterize one glyph at `size_px` using the bundled Roboto face.
 pub fn rasterize_glyph(ch: char, size_px: f32) -> Result<RasterizedGlyph> {
     if ch == '\u{2026}' {
         return compose_ellipsis(size_px);
     }
-    with_rasterizer(|r| r.rasterize(ch, size_px))
+    let draw = rasterize_char(ch);
+    with_rasterizer(|r| r.rasterize(draw, size_px))
 }
 
 fn compose_ellipsis(size_px: f32) -> Result<RasterizedGlyph> {
@@ -533,20 +543,33 @@ mod tests {
         assert!(cjk.pixels.iter().any(|&b| b > 0));
     }
 
-    /// Roboto lacks U+2011; GDI used to substitute `.notdef` (tofu) with ink,
-    /// so the Segoe fallback never ran. Segoe should render a real hyphen.
+    /// U+2011 must look like ASCII `-`, not Roboto's tofu `.notdef` box.
     #[test]
-    fn rasterize_non_breaking_hyphen() {
-        let g = rasterize_glyph('\u{2011}', 14.0).expect("nbhyphen");
-        assert!(g.advance_width > 0.0);
+    fn rasterize_non_breaking_hyphen_matches_ascii_hyphen() {
+        let nb = rasterize_glyph('\u{2011}', 14.0).expect("nbhyphen");
+        let hy = rasterize_glyph('-', 14.0).expect("hyphen");
+        assert!(nb.advance_width > 0.0);
+        assert!(nb.pixels.iter().any(|&b| b > 0));
+        assert_eq!(nb.width, hy.width, "nb hyphen should use ASCII hyphen ink");
+        assert_eq!(nb.height, hy.height);
+        assert_eq!(nb.pixels, hy.pixels);
+    }
+
+    #[test]
+    fn rasterize_wic_based_sample_line_fragment() {
+        let frag = "WIC\u{2011}based";
+        let size = 14.0;
+        let w_frag: f32 = frag
+            .chars()
+            .map(|ch| rasterize_glyph(ch, size).unwrap().advance_width)
+            .sum();
+        let w_ascii: f32 = "WIC-based"
+            .chars()
+            .map(|ch| rasterize_glyph(ch, size).unwrap().advance_width)
+            .sum();
         assert!(
-            g.pixels.iter().any(|&b| b > 0),
-            "expected visible hyphen, not empty/tofu"
-        );
-        let nz = g.pixels.iter().filter(|&&b| b > 0).count();
-        assert!(
-            nz < 80,
-            "tofu .notdef boxes are much denser than a hyphen; got nz={nz}"
+            (w_frag - w_ascii).abs() < 0.5,
+            "fragment width {w_frag} should match WIC-based {w_ascii}"
         );
     }
 

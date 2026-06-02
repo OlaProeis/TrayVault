@@ -27,6 +27,18 @@ The codebase is **100% AI-generated** (Rust, docs, and config), built with the s
 
 All builds come from tagged [GitHub Releases](https://github.com/OlaProeis/TrayVault/releases/latest). See [CHANGELOG.md](CHANGELOG.md) for version notes.
 
+### What's new in 0.1.1
+
+Patch release focused on performance, image storage, and reliability. Highlights:
+
+- **WIC compressed image blobs** — new captures stored as PNG (default) or JPEG; much smaller on disk; existing raw blobs still read
+- **Faster history list** — cached layout, hover repaint gating, wheel-scroll coalescing, binary-search culling, async thumbnail loading
+- **Sharper screenshot thumbnails** — higher display caps so landscape captures use full card width
+- **Page Up / Page Down** — scroll the list by one visible viewport
+- **Fixes** — scrollbar thumb drag crash, gray image cards when WIC encode fails, stuck thumbnail placeholders, Unicode hyphen tofu boxes (e.g. “WIC‑based”)
+
+Full notes: [CHANGELOG.md#011](CHANGELOG.md#011).
+
 ### After install
 
 - Open history with the global hotkey (**`Alt+V`** by default) or the system tray icon

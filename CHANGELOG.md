@@ -25,6 +25,7 @@ _Planned for 0.2.0: winget manifest, HiDPI, copy-as-plain-text, and remaining po
 - History scrollbar thumb drag no longer crashes on mouse-up (`STATUS_STACK_BUFFER_OVERRUN`) — `ReleaseCapture()` was removed from the drag-end path (Windows releases capture on button-up), and `WM_CAPTURECHANGED` is deferred until after `WndProc` returns so `App`/`UiState` `RefCell` borrows are not re-entered during input handling
 - **Gray blank image cards** when WIC PNG encode failed on persist (`CreateEncoder` / codec not found) — `write_blob` now falls back to legacy raw BGRA on disk so captures still save and thumbnails can load
 - **Stuck gray thumbnail placeholders** when the async thumb worker could not read or scale a blob — failed loads clear the in-flight key and post `WM_THUMB_READY` so the next paint retries (covers persist race and missing blobs)
+- **Tofu boxes for Unicode hyphens** (U+2010/U+2011/U+2012, e.g. “WIC‑based”) — bundled Roboto can expose a cmap slot that still draws `.notdef`; those code points now rasterize as ASCII `-`
 
 ### Performance
 
