@@ -14,6 +14,7 @@ pub mod glyph_raster;
 pub mod hotkey;
 pub mod shell;
 pub mod tray;
+pub mod wic;
 pub mod window;
 
 use crate::error::{ClipError, Result};

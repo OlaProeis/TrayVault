@@ -4,13 +4,12 @@ use crate::ui::pixmap::Pixmap;
 
 use crate::app::App;
 use crate::ui::history::{
-    build_list_layout, draw_history_list, entry_inner_width, total_content_height, EntryLayout,
+    draw_history_list, entry_inner_width, refresh_list_layout, total_content_height, EntryLayout,
 };
 use crate::ui::preview::{draw_help_overlay, draw_image_preview};
 use crate::ui::scroll_bar::{self, tick_now};
 use crate::ui::search::{
     content_viewport_height, draw_sticky_footer, draw_sticky_header, header_total_height,
-    refresh_display_indices,
 };
 use crate::ui::settings::draw_settings;
 use crate::ui::theme::resolve_theme;
@@ -26,7 +25,7 @@ pub fn render_app(app: &App, ui: &mut UiState, size: (u32, u32), bgra_dst: &mut 
     let height = size.1.max(1);
     let theme = resolve_theme(app.config.theme);
 
-    let Some(mut pixmap) = Pixmap::new(width, height) else {
+    let Some(mut pixmap) = ui.take_scratch(width, height) else {
         return;
     };
 
@@ -40,7 +39,6 @@ pub fn render_app(app: &App, ui: &mut UiState, size: (u32, u32), bgra_dst: &mut 
     );
 
     ui.begin_frame();
-    refresh_display_indices(app, ui);
 
     let mut glyph_cache = std::mem::take(&mut ui.glyph_cache);
     let mut ctx = UiContext::new(
@@ -68,24 +66,23 @@ pub fn render_app(app: &App, ui: &mut UiState, size: (u32, u32), bgra_dst: &mut 
         ui.active_widget = ctx.active_widget;
         ui.glyph_cache = glyph_cache;
         write_rgba_to_bgra(pixmap.data(), bgra_dst);
+        ui.return_scratch(pixmap);
         return;
     }
+
+    let thumb_max_w = entry_inner_width(width as f32);
+    let old_bucket = ui.thumb_cache.width_bucket();
+    ui.thumb_cache.set_width_bucket(thumb_max_w);
+    if ui.thumb_cache.width_bucket() != old_bucket {
+        ui.thumb_load_state.reset_on_width_change();
+    }
+    refresh_list_layout(app, ui, thumb_max_w);
+    let content_height = total_content_height(&ui.cached_list_layout);
+    ui.last_content_height = content_height;
 
     let content_top = header_total_height();
     let content_h = content_viewport_height(height as f32);
     let content_w = (width as f32 - PADDING * 2.0).max(0.0);
-
-    let thumb_max_w = entry_inner_width(width as f32);
-    ui.thumb_cache.set_width_bucket(thumb_max_w);
-    let layouts = build_list_layout(
-        &ui.display_indices,
-        &app.entries,
-        thumb_max_w,
-        &mut ui.glyph_cache,
-        &ui.expanded_text_entries,
-    );
-    let content_height = total_content_height(&layouts);
-    ui.last_content_height = content_height;
 
     ui.scroll_offset = ui
         .scroll_offset
@@ -98,9 +95,10 @@ pub fn render_app(app: &App, ui: &mut UiState, size: (u32, u32), bgra_dst: &mut 
             &mut pixmap,
             &mut ctx,
             app,
-            app.store(),
+            app.thumb_loader(),
+            &mut ui.thumb_load_state,
             &mut ui.thumb_cache,
-            &layouts,
+            &ui.cached_list_layout,
             ui.scroll_offset,
             content_top,
             content_h,
@@ -174,6 +172,7 @@ pub fn render_app(app: &App, ui: &mut UiState, size: (u32, u32), bgra_dst: &mut 
 
     ui.glyph_cache = glyph_cache;
     write_rgba_to_bgra(pixmap.data(), bgra_dst);
+    ui.return_scratch(pixmap);
 }
 
 fn draw_empty_state(ctx: &mut UiContext<'_>, pixmap: &mut Pixmap, app: &App, content_top: f32) {
@@ -219,13 +218,8 @@ fn draw_empty_state(ctx: &mut UiContext<'_>, pixmap: &mut Pixmap, app: &App, con
 #[allow(dead_code)]
 pub fn list_layout_for(app: &App, ui: &mut UiState, client_width: f32) -> (Vec<EntryLayout>, f32) {
     let thumb_max_w = entry_inner_width(client_width);
-    let layouts = build_list_layout(
-        &ui.display_indices,
-        &app.entries,
-        thumb_max_w,
-        &mut ui.glyph_cache,
-        &ui.expanded_text_entries,
-    );
+    refresh_list_layout(app, ui, thumb_max_w);
+    let layouts = ui.cached_list_layout.clone();
     let h = total_content_height(&layouts);
     (layouts, h)
 }
@@ -275,6 +269,27 @@ mod tests {
         render_app(&app, &mut ui, (320, 240), &mut bgra);
         assert_eq!(bgra.len(), 320 * 240 * 4);
         assert!(bgra[3] > 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_app_reuses_scratch_buffer_at_same_size() {
+        let dir = temp_data_dir("scratch");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        let store = Store::open_for_test(dir.clone());
+        let app = App::new(Config::default(), LoadResult::default(), store);
+        let mut ui = UiState::default();
+        let mut bgra = vec![0u8; 64 * 48 * 4];
+
+        render_app(&app, &mut ui, (64, 48), &mut bgra);
+        let ptr1 = ui.scratch.as_ref().expect("scratch").data().as_ptr();
+
+        render_app(&app, &mut ui, (64, 48), &mut bgra);
+        let ptr2 = ui.scratch.as_ref().expect("scratch").data().as_ptr();
+        assert_eq!(ptr1, ptr2, "same dimensions should reuse pixel storage");
 
         let _ = fs::remove_dir_all(&dir);
     }

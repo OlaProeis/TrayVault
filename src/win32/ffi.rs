@@ -106,6 +106,7 @@ pub type LPVOID = *mut c_void;
 pub type LPCVOID = *const c_void;
 pub type LPWSTR = *mut WCHAR;
 pub type LPCWSTR = *const WCHAR;
+pub type LPCSTR = *const i8;
 
 /// Window procedure signature. `None` is a null `WNDPROC`.
 pub type WNDPROC = Option<unsafe extern "system" fn(HWND, UINT, WPARAM, LPARAM) -> LRESULT>;
@@ -436,6 +437,7 @@ pub const WM_LBUTTONDBLCLK: UINT = 0x0203;
 pub const WM_RBUTTONDOWN: UINT = 0x0204;
 pub const WM_RBUTTONUP: UINT = 0x0205;
 pub const WM_MOUSEWHEEL: UINT = 0x020A;
+pub const WM_CAPTURECHANGED: UINT = 0x0215;
 pub const WM_SETCURSOR: UINT = 0x0020;
 
 // System command codes (WM_SYSCOMMAND wParam).
@@ -683,6 +685,10 @@ extern "system" {
 
     pub fn MoveFileExW(lpExistingFileName: LPCWSTR, lpNewFileName: LPCWSTR, dwFlags: DWORD)
         -> BOOL;
+
+    pub fn LoadLibraryW(lpLibFileName: LPCWSTR) -> HMODULE;
+
+    pub fn GetProcAddress(hModule: HMODULE, lpProcName: LPCSTR) -> LPVOID;
 }
 
 // ---------------------------------------------------------------------------
@@ -798,6 +804,7 @@ extern "system" {
     pub fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut DWORD) -> DWORD;
 
     pub fn GetKeyState(nVirtKey: i32) -> i16;
+    pub fn SetCapture(hWnd: HWND) -> HWND;
     pub fn ReleaseCapture() -> BOOL;
     pub fn ScreenToClient(hWnd: HWND, lpPoint: *mut POINT) -> BOOL;
     pub fn GetCursorPos(lpPoint: *mut POINT) -> BOOL;
@@ -858,6 +865,11 @@ pub const DEFAULT_PITCH_AND_FAMILY: DWORD = DEFAULT_PITCH | FF_DONTCARE;
 pub const GGO_METRICS: UINT = 0;
 pub const GGO_BITMAP: UINT = 1;
 pub const GGO_GRAY8_BITMAP: UINT = 6;
+
+/// [`GetGlyphIndicesW`] flag: unmapped code points get index `0xFFFF`.
+pub const GGI_MARK_UNAVAIL: DWORD = 0x10;
+pub const GLYPH_INDEX_UNAVAILABLE: WORD = 0xFFFF;
+pub const GDI_ERROR: DWORD = 0xFFFF_FFFF;
 
 // `SetTextAlign` flags. `TA_BASELINE` makes `TextOutW`'s `y` the glyph baseline
 // row (instead of the default `TA_TOP` cell-top), which lets the rasterizer
@@ -932,6 +944,7 @@ extern "system" {
         lpBuffer: LPVOID,
         lpmat2: *const MAT2,
     ) -> DWORD;
+    pub fn GetGlyphIndicesW(hdc: HDC, lpstr: LPCWSTR, c: INT, pgi: *mut WORD, fl: DWORD) -> DWORD;
 }
 
 // ---------------------------------------------------------------------------
@@ -969,6 +982,101 @@ extern "system" {
 /// Win32 `HRESULT` success sentinel.
 pub type HRESULT = i32;
 pub const S_OK: HRESULT = 0;
+
+/// COM success test (`hr >= 0`).
+#[inline]
+pub const fn succeeded(hr: HRESULT) -> bool {
+    hr >= 0
+}
+
+/// COM failure test (`hr < 0`).
+#[inline]
+pub const fn failed(hr: HRESULT) -> bool {
+    hr < 0
+}
+
+/// `CoInitializeEx` — apartment-threaded model.
+pub const COINIT_APARTMENTTHREADED: DWORD = 0x2;
+
+/// COM already initialized on this thread with a different concurrency model.
+pub const RPC_E_CHANGED_MODE: HRESULT = 0x8001_0106_u32 as i32;
+
+/// `VariantInit` / `VariantClear` variant type: 32-bit float.
+pub const VT_R4: u16 = 4;
+
+/// OLE `VARIANT` (simplified layout for `VT_R4` writes).
+#[repr(C)]
+pub struct VARIANT {
+    pub vt: u16,
+    pub wReserved1: u16,
+    pub wReserved2: u16,
+    pub wReserved3: u16,
+    pub data: VARIANTData,
+}
+
+#[repr(C)]
+pub union VARIANTData {
+    pub fltVal: f32,
+    pub llVal: i64,
+    pub pdispVal: LPVOID,
+}
+
+/// `PROPBAG2` — property name bag entry for `IPropertyBag2::Write`.
+#[repr(C)]
+pub struct PROPBAG2 {
+    pub dwType: DWORD,
+    pub vt: u16,
+    pub cfType: u16,
+    pub dwHint: DWORD,
+    pub pstrName: LPWSTR,
+    pub clsid: GUID,
+}
+
+/// COM `GUID` / `IID` / `CLSID`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GUID {
+    pub data1: u32,
+    pub data2: u16,
+    pub data3: u16,
+    pub data4: [u8; 8],
+}
+
+// ---------------------------------------------------------------------------
+// ole32 (COM — WIC blob codecs)
+// ---------------------------------------------------------------------------
+
+#[link(name = "ole32")]
+extern "system" {
+    pub fn CoInitializeEx(pvReserved: LPVOID, dwCoInit: DWORD) -> HRESULT;
+    pub fn CoUninitialize();
+    pub fn CoCreateInstance(
+        rclsid: *const GUID,
+        pUnkOuter: LPVOID,
+        dwClsContext: DWORD,
+        riid: *const GUID,
+        ppv: *mut LPVOID,
+    ) -> HRESULT;
+    pub fn CreateStreamOnHGlobal(
+        hGlobal: HGLOBAL,
+        fDeleteOnRelease: BOOL,
+        ppstm: *mut LPVOID,
+    ) -> HRESULT;
+    pub fn GetHGlobalFromStream(pstm: LPVOID, phglobal: *mut HGLOBAL) -> HRESULT;
+}
+
+/// `CoCreateInstance` — in-process server.
+pub const CLSCTX_INPROC_SERVER: DWORD = 0x1;
+
+// Pull in WIC codecs DLL so in-proc COM class registration is available.
+#[link(name = "windowscodecs")]
+extern "system" {}
+
+#[link(name = "oleaut32")]
+extern "system" {
+    pub fn VariantInit(pvarg: *mut VARIANT);
+    pub fn VariantClear(pvarg: *mut VARIANT) -> HRESULT;
+}
 
 // ---------------------------------------------------------------------------
 // advapi32 (registry — autostart Task 12, system theme Task 8)

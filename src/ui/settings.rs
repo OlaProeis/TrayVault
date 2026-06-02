@@ -7,7 +7,7 @@ use crate::ui::search_edit::{
 };
 use crate::ui::text::GlyphCache;
 
-use crate::config::{Config, ThemeMode};
+use crate::config::{Config, ImageBlobCodec, ThemeMode};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{
     draw_toggle, fill_rect, filter_chip, input_box, rgba_to_color, UiContext, WidgetRect, PADDING,
@@ -21,6 +21,8 @@ const TOGGLE_ROW_H: f32 = 50.0;
 const INPUT_BLOCK_H: f32 = 72.0;
 const INPUT_H: f32 = 32.0;
 const THEME_ROW_H: f32 = 36.0;
+/// Label + hint + codec chips (aligned with [`draw_input_setting`] label/hint/control spacing).
+const CODEC_ROW_H: f32 = 58.0;
 const BACK_BTN: f32 = 32.0;
 const SEPARATOR_TOP: f32 = 4.0;
 const SEPARATOR_BOTTOM: f32 = 12.0;
@@ -37,14 +39,19 @@ pub const GITHUB_REPO_URL: &str = "https://github.com/OlaProeis/TrayVault";
 const GITHUB_LINK_LABEL: &str = "github.com/OlaProeis/TrayVault";
 
 /// Total scrollable content height for the settings list.
-pub fn settings_content_height() -> f32 {
-    TOGGLE_ROW_H * 7.0
+pub fn settings_content_height(config: &Config) -> f32 {
+    let mut h = TOGGLE_ROW_H * 7.0
         + INPUT_BLOCK_H * 3.0
         + THEME_ROW_H
         + INFO_BLOCK_H
         + ROW_GAP * 12.0
         + SEPARATOR_H * SEPARATOR_COUNT
-        + 8.0
+        + 8.0;
+    h += CODEC_ROW_H + ROW_GAP; // image blob codec chips
+    if config.image_blob_codec == ImageBlobCodec::Jpeg {
+        h += INPUT_BLOCK_H + ROW_GAP; // JPEG quality
+    }
+    h
 }
 
 pub fn draw_settings(
@@ -59,7 +66,7 @@ pub fn draw_settings(
     let width = pixmap.width() as f32;
     let height = pixmap.height() as f32;
 
-    let content_h = settings_content_height();
+    let content_h = settings_content_height(config);
     let viewport_h = (height - top - HEADER_H - FOOTER_H).max(0.0);
     let max_scroll = (content_h - viewport_h).max(0.0);
     ui.settings_scroll = ui.settings_scroll.clamp(0.0, max_scroll);
@@ -280,6 +287,60 @@ pub fn draw_settings(
     );
     rects.max_image_mb = Some(max_mb_rect);
     y += INPUT_BLOCK_H + ROW_GAP;
+
+    ctx.cache.draw(
+        pixmap,
+        "Image blob codec",
+        PADDING,
+        y + 4.0,
+        13.0,
+        rgba_to_color(theme.text_primary),
+    );
+    ctx.cache.draw(
+        pixmap,
+        "New captures only; existing blobs stay readable",
+        PADDING,
+        y + 20.0,
+        11.0,
+        rgba_to_color(theme.text_secondary),
+    );
+    let codec_chip_y = y + 36.0;
+    let mut codec_x = PADDING;
+    for (codec, label) in [(ImageBlobCodec::Png, "PNG"), (ImageBlobCodec::Jpeg, "JPEG")] {
+        let selected = config.image_blob_codec == codec;
+        let (rect, _) = filter_chip(ctx, pixmap, label, codec_x, codec_chip_y, selected);
+        match codec {
+            ImageBlobCodec::Png => rects.blob_codec_png = Some(rect),
+            ImageBlobCodec::Jpeg => rects.blob_codec_jpeg = Some(rect),
+        }
+        codec_x = rect.x + rect.w + 8.0;
+    }
+    y += CODEC_ROW_H + ROW_GAP;
+
+    if config.image_blob_codec == ImageBlobCodec::Jpeg {
+        let jpeg_focused = ui.settings_focus == SettingsFocus::JpegQuality;
+        let (jpeg_rect, _) = draw_input_setting(
+            ctx,
+            pixmap,
+            theme,
+            "JPEG quality",
+            "1–100; lossy paste when copying images back",
+            &ui.settings_edit_jpeg_quality,
+            PADDING,
+            y,
+            row_w,
+            jpeg_focused,
+            if jpeg_focused { ui.settings_caret } else { 0 },
+            if jpeg_focused {
+                ui.settings_sel_anchor
+            } else {
+                0
+            },
+        );
+        rects.jpeg_quality = Some(jpeg_rect);
+        y += INPUT_BLOCK_H + ROW_GAP;
+    }
+
     y = draw_separator(pixmap, theme, PADDING, y, row_w);
 
     rects.autostart = Some(draw_toggle_setting(
@@ -567,4 +628,5 @@ pub fn sync_settings_edits_from_config(ui: &mut UiState, config: &Config) {
     ui.settings_edit_max_entries = config.max_entries.to_string();
     ui.settings_edit_hotkey = config.hotkey.clone();
     ui.settings_edit_max_image_mb = format_max_image_edit(config.max_image_size_mb);
+    ui.settings_edit_jpeg_quality = config.jpeg_quality.to_string();
 }

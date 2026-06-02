@@ -86,14 +86,16 @@ impl UiFontRasterizer {
             return Err(last_error("SelectObject(font)"));
         }
 
+        let primary_ok = glyph_in_font(self.mem_dc, ch);
         let result = rasterize_on_dc(self.mem_dc, ch);
         // SAFETY: restore the previous GDI font.
         unsafe {
             ffi::SelectObject(self.mem_dc, prev_font);
         }
-        if result
-            .as_ref()
-            .is_ok_and(|g| g.pixels.iter().any(|&b| b > 0))
+        if primary_ok
+            && result
+                .as_ref()
+                .is_ok_and(|g| g.pixels.iter().any(|&b| b > 0))
         {
             return result;
         }
@@ -249,6 +251,29 @@ fn create_font(face: &str, size_px: f32) -> Result<ffi::HFONT> {
     } else {
         Ok(hfont)
     }
+}
+
+/// True when the font selected into `hdc` has a real cmap entry for `ch` (not
+/// `.notdef`). GDI would otherwise draw a tofu box that still has ink, which
+/// blocked the empty-ink Segoe fallback (e.g. U+2011 non-breaking hyphen).
+fn glyph_in_font(hdc: ffi::HDC, ch: char) -> bool {
+    let text = wide(&ch.to_string());
+    let char_count = ch.len_utf16() as ffi::INT;
+    let mut index = ffi::GLYPH_INDEX_UNAVAILABLE;
+    // SAFETY: `text` is NUL-terminated UTF-16; `index` is a single out-slot.
+    let ret = unsafe {
+        ffi::GetGlyphIndicesW(
+            hdc,
+            text.as_ptr(),
+            char_count,
+            &mut index,
+            ffi::GGI_MARK_UNAVAIL,
+        )
+    };
+    if ret == ffi::GDI_ERROR {
+        return false;
+    }
+    index != ffi::GLYPH_INDEX_UNAVAILABLE
 }
 
 fn glyph_advance(hdc: ffi::HDC, ch: char, cell_inc: f32) -> f32 {
@@ -506,6 +531,23 @@ mod tests {
         let cjk = rasterize_glyph('中', 14.0).expect("cjk");
         assert!(cjk.advance_width > 0.0);
         assert!(cjk.pixels.iter().any(|&b| b > 0));
+    }
+
+    /// Roboto lacks U+2011; GDI used to substitute `.notdef` (tofu) with ink,
+    /// so the Segoe fallback never ran. Segoe should render a real hyphen.
+    #[test]
+    fn rasterize_non_breaking_hyphen() {
+        let g = rasterize_glyph('\u{2011}', 14.0).expect("nbhyphen");
+        assert!(g.advance_width > 0.0);
+        assert!(
+            g.pixels.iter().any(|&b| b > 0),
+            "expected visible hyphen, not empty/tofu"
+        );
+        let nz = g.pixels.iter().filter(|&&b| b > 0).count();
+        assert!(
+            nz < 80,
+            "tofu .notdef boxes are much denser than a hyphen; got nz={nz}"
+        );
     }
 
     /// Render a glyph to ASCII art (5 luma buckets) for failure diagnostics.

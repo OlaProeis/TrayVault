@@ -115,6 +115,8 @@ fn run() -> Result<()> {
     let ui = Rc::new(RefCell::new(UiState::new()));
     let quitting = Rc::new(Cell::new(false));
 
+    app.borrow().thumb_loader().set_notify_hwnd(hwnd);
+
     app.borrow_mut()
         .apply_capture_config(&mut monitor.borrow_mut());
 
@@ -181,6 +183,9 @@ fn wire_callbacks(window: &mut win32::window::Window, hwnd: win32::ffi::HWND, ct
     let app_paint = Rc::clone(&ctx.app);
     let ui_paint = Rc::clone(&ctx.ui);
 
+    let app_thumb = Rc::clone(&ctx.app);
+    let ui_thumb = Rc::clone(&ctx.ui);
+
     let app_input = Rc::clone(&ctx.app);
     let ui_input = Rc::clone(&ctx.ui);
     let monitor_input = Rc::clone(&ctx.monitor);
@@ -222,12 +227,23 @@ fn wire_callbacks(window: &mut win32::window::Window, hwnd: win32::ffi::HWND, ct
             let needed = win32::gdi::GdiBuffer::required_bytes(gdi.width(), gdi.height());
             ui::render::render_app(&app_ref, &mut ui_ref, (w, h), &mut gdi.bits_mut()[..needed]);
             let now = ui::scroll_bar::tick_now();
+            ui_ref.clear_scroll_repaint_after_paint(now);
+            if ui_ref.take_deferred_scroll_repaint(now) {
+                request_window_repaint(hwnd);
+            }
             if ui_ref.scrollbar_fading(now) {
                 let last = ui_ref.scrollbar_last_fade_tick;
                 if now.saturating_sub(last) >= 16 {
                     ui_ref.scrollbar_last_fade_tick = now;
                     request_window_repaint(hwnd);
                 }
+            }
+        })),
+        on_thumb_ready: Some(Box::new(move || {
+            let replies = app_thumb.borrow().thumb_loader().drain_replies();
+            let mut ui_ref = ui_thumb.borrow_mut();
+            if ui_ref.apply_thumb_replies(&replies) {
+                request_window_repaint(hwnd);
             }
         })),
         on_nc_client_override: Some(Box::new(move |cx, cy, w, h| {

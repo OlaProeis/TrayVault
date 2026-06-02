@@ -8,12 +8,13 @@
 
 use std::collections::HashMap;
 
-use crate::config::Config;
+use crate::config::{BlobWriteConfig, Config};
 use crate::error::{ClipError, Result};
 use crate::hash::is_duplicate_entry;
 use crate::log;
 use crate::models::{ClipEntry, EntryKind};
 use crate::store::{LoadResult, Store};
+use crate::ui::thumb_loader::ThumbLoader;
 use crate::win32::clipboard::{write_entry_to_clipboard, ClipboardMonitor};
 use crate::win32::ffi::HWND;
 
@@ -27,6 +28,7 @@ pub struct App {
     pub filter_query: String,
     pub pause_capture: bool,
     store: Store,
+    thumb_loader: ThumbLoader,
     hash_index: HashMap<[u8; 32], u32>,
     next_id: u64,
     window_visible: bool,
@@ -39,6 +41,8 @@ impl App {
         let mut entries = loaded.entries;
         ensure_most_recent_first(&mut entries);
         let hash_index = build_hash_index(&entries);
+        let data_dir = store.data_dir_path().to_path_buf();
+        let thumb_loader = ThumbLoader::new(data_dir);
         Self {
             pause_capture: config.pause_capture,
             config,
@@ -47,11 +51,16 @@ impl App {
             selected_index: 0,
             filter_query: String::new(),
             store,
+            thumb_loader,
             hash_index,
             next_id: loaded.next_id,
             window_visible: false,
             needs_repaint: false,
         }
+    }
+
+    pub fn thumb_loader(&self) -> &ThumbLoader {
+        &self.thumb_loader
     }
 
     pub fn store(&self) -> &Store {
@@ -70,6 +79,11 @@ impl App {
         let needed = self.needs_repaint;
         self.needs_repaint = false;
         needed
+    }
+
+    /// Snapshot of blob codec settings for the storage worker.
+    fn blob_write_config(&self) -> BlobWriteConfig {
+        BlobWriteConfig::from_config(&self.config)
     }
 
     /// Apply current config to the clipboard monitor's capture toggles.
@@ -110,7 +124,8 @@ impl App {
             self.enqueue_removed_entry_delete(removed_entry);
         }
 
-        self.store.enqueue_persist(&self.entries);
+        self.store
+            .enqueue_persist(&self.entries, self.blob_write_config());
         if kind == EntryKind::Image {
             Self::release_captured_image_pixels(&mut self.entries, id);
         }
@@ -188,7 +203,8 @@ impl App {
             self.enqueue_removed_entry_delete(removed_entry);
         }
         if !removed.is_empty() {
-            self.store.enqueue_persist(&self.entries);
+            self.store
+                .enqueue_persist(&self.entries, self.blob_write_config());
             self.store.enqueue_prune_orphans(&self.entries);
         }
         if self.selected_index >= self.entries.len() {
@@ -239,6 +255,23 @@ impl App {
         self.persist_config()
     }
 
+    /// Update image blob codec (new writes only) and persist.
+    pub fn set_image_blob_codec(&mut self, codec: crate::config::ImageBlobCodec) -> Result<()> {
+        self.config.image_blob_codec = codec;
+        self.persist_config()
+    }
+
+    /// Update JPEG blob quality (1–100) and persist.
+    pub fn set_jpeg_quality(&mut self, quality: u8) -> Result<()> {
+        if !(1..=100).contains(&quality) {
+            return Err(ClipError::Config(
+                "jpeg_quality must be between 1 and 100".into(),
+            ));
+        }
+        self.config.jpeg_quality = quality;
+        self.persist_config()
+    }
+
     /// Persist in-memory pause flag into config before exit.
     pub fn sync_config(&mut self) {
         self.config.pause_capture = self.pause_capture;
@@ -262,7 +295,7 @@ impl App {
         self.sync_config();
         crate::win32::window::capture_geometry_into_config(hwnd, &mut self.config);
         self.config.save(config_path)?;
-        self.store.flush(&self.entries);
+        self.store.flush(&self.entries, self.blob_write_config());
         Ok(())
     }
 
@@ -278,9 +311,10 @@ impl App {
         Ok(())
     }
 
-    /// Join the storage worker after the message loop exits.
+    /// Join background worker threads after the message loop exits.
     pub fn join_storage(&mut self) {
         self.store.join();
+        self.thumb_loader.join();
     }
 
     /// Toggle pin state for an entry and persist.
@@ -292,7 +326,8 @@ impl App {
             entry.is_pinned = !entry.is_pinned;
             entry.is_pinned
         };
-        self.store.enqueue_persist(&self.entries);
+        self.store
+            .enqueue_persist(&self.entries, self.blob_write_config());
         self.bump_entries_version();
         self.needs_repaint = true;
         log::info(&format!("entry id={entry_id} pin={pinned}"));
@@ -306,7 +341,8 @@ impl App {
         let removed = self.entries.remove(pos);
         remove_hash(&mut self.hash_index, removed.hash);
         self.enqueue_removed_entry_delete(&removed);
-        self.store.enqueue_persist(&self.entries);
+        self.store
+            .enqueue_persist(&self.entries, self.blob_write_config());
         if self.selected_index >= self.entries.len() {
             self.selected_index = self.entries.len().saturating_sub(1);
         }
@@ -395,7 +431,7 @@ impl App {
         entry
             .image
             .as_ref()
-            .and_then(|img| store.read_blob(&img.hash))
+            .and_then(|img| store.read_blob(&img.hash, img.width, img.height))
     }
 }
 
@@ -663,6 +699,10 @@ mod tests {
 
     #[test]
     fn delete_entry_preserves_blob_when_hash_still_referenced() {
+        if !crate::win32::wic::wic_codecs_available() {
+            log::warn("skip shared-blob delete test: WIC unavailable");
+            return;
+        }
         let dir = temp_data_dir("shared-blob-delete");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("mkdir");
@@ -684,13 +724,13 @@ mod tests {
         let older_id = app.entries[2].id;
         let newer_id = app.entries[0].id;
 
-        app.store().flush(&app.entries);
+        app.store().flush(&app.entries, app.blob_write_config());
         clear_image_pixels(&mut app.entries);
 
         app.delete_entry(newer_id);
-        app.store().flush(&app.entries);
+        app.store().flush(&app.entries, app.blob_write_config());
 
-        assert_eq!(app.store().read_blob(&hash_hex), Some(pixels.clone()));
+        assert_eq!(app.store().read_blob(&hash_hex, 1, 1), Some(pixels.clone()));
         let surviving = app
             .entries
             .iter()
@@ -706,6 +746,10 @@ mod tests {
 
     #[test]
     fn image_pixels_cleared_after_capture_and_recoverable_via_blob() {
+        if !crate::win32::wic::wic_codecs_available() {
+            log::warn("skip release-pixels test: WIC unavailable");
+            return;
+        }
         let dir = temp_data_dir("release-pixels");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("mkdir");
@@ -719,8 +763,8 @@ mod tests {
         assert_eq!(app.entries.len(), 1);
         assert!(app.entries[0].image_pixels.is_none());
 
-        app.store().flush(&app.entries);
-        assert_eq!(app.store().read_blob(&hash_hex), Some(pixels.clone()));
+        app.store().flush(&app.entries, app.blob_write_config());
+        assert_eq!(app.store().read_blob(&hash_hex, 1, 1), Some(pixels.clone()));
         assert_eq!(
             App::resolve_image_pixels(&app.entries[0], app.store()),
             Some(pixels)
@@ -731,6 +775,10 @@ mod tests {
 
     #[test]
     fn delete_entry_removes_blob_when_unreferenced() {
+        if !crate::win32::wic::wic_codecs_available() {
+            log::warn("skip single-blob delete test: WIC unavailable");
+            return;
+        }
         let dir = temp_data_dir("single-blob-delete");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("mkdir");
@@ -741,14 +789,14 @@ mod tests {
         let mut app = App::new(Config::default(), LoadResult::default(), store);
 
         app.on_clipboard_captured(Some(image_entry(&pixels, 1)));
-        app.store().flush(&app.entries);
+        app.store().flush(&app.entries, app.blob_write_config());
         let id = app.entries[0].id;
         clear_image_pixels(&mut app.entries);
 
         app.delete_entry(id);
-        app.store().flush(&app.entries);
+        app.store().flush(&app.entries, app.blob_write_config());
 
-        assert!(app.store().read_blob(&hash_hex).is_none());
+        assert!(app.store().read_blob(&hash_hex, 1, 1).is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }

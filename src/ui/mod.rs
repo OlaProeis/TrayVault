@@ -1,6 +1,7 @@
 //! Immediate-mode UI: hand-rolled pixmap rasterization, GDI text, themes, and views.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub mod history;
 pub mod input;
@@ -15,16 +16,33 @@ pub mod settings_input;
 pub mod text;
 pub mod theme;
 pub mod thumb_cache;
+pub mod thumb_loader;
 pub mod titlebar;
 pub mod widgets;
 
 use crate::app::App;
 use crate::config::Config;
 use crate::models::ClipEntry;
+use crate::ui::pixmap::Pixmap;
 use crate::ui::preview::PreviewImageCache;
 use crate::ui::text::GlyphCache;
 use crate::ui::thumb_cache::ThumbCache;
 use crate::ui::widgets::WidgetRect;
+
+/// Tracks in-flight async thumbnail loads (keyed by `(entry_id, dst_w, dst_h)`).
+#[derive(Debug, Default)]
+pub struct ThumbLoadState {
+    pub inflight: HashSet<(u64, u32, u32)>,
+    pub generation: u64,
+}
+
+impl ThumbLoadState {
+    /// Invalidate pending loads after window resize clears the thumb cache bucket.
+    pub fn reset_on_width_change(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.inflight.clear();
+    }
+}
 
 /// Filter chip selection for the history list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -62,6 +80,7 @@ pub enum SettingsFocus {
     MaxEntries,
     Hotkey,
     MaxImageSizeMb,
+    JpegQuality,
 }
 
 /// Per-control hit targets for the settings panel (filled each paint).
@@ -80,6 +99,9 @@ pub struct SettingsRects {
     pub close_on_copy: Option<WidgetRect>,
     pub show_in_taskbar: Option<WidgetRect>,
     pub max_image_mb: Option<WidgetRect>,
+    pub blob_codec_png: Option<WidgetRect>,
+    pub blob_codec_jpeg: Option<WidgetRect>,
+    pub jpeg_quality: Option<WidgetRect>,
     pub autostart: Option<WidgetRect>,
     pub github: Option<WidgetRect>,
 }
@@ -107,6 +129,91 @@ struct DisplayIndicesKey {
     entries_version: u64,
     filter: EntryFilter,
     query: String,
+}
+
+/// Inputs that determine per-row layout heights (`build_list_layout` cache key).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListLayoutKey {
+    entries_version: u64,
+    filter: EntryFilter,
+    query: String,
+    expanded_version: u64,
+    thumb_max_w_bucket: u32,
+}
+
+/// Per-entry inputs that determine a text row's wrapped height.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EntryHeightKey {
+    content_hash: [u8; 32],
+    expanded: bool,
+    thumb_max_w_bucket: u32,
+}
+
+#[derive(Debug)]
+struct CachedTextRowLayout {
+    key: EntryHeightKey,
+    height: f32,
+    show_control: bool,
+    draw_lines: Vec<String>,
+}
+
+/// Cached text-row layout keyed by entry id; cleared when `App::entries_version` changes.
+#[derive(Debug, Default)]
+pub(crate) struct EntryHeightCache {
+    entries_version: u64,
+    layouts: HashMap<u64, CachedTextRowLayout>,
+    pub hit_count: u64,
+    pub miss_count: u64,
+}
+
+impl EntryHeightCache {
+    /// Drop all cached layouts when history metadata changes (capture, delete, pin, cap prune).
+    pub fn sync_entries_version(&mut self, entries_version: u64) {
+        if self.entries_version != entries_version {
+            self.layouts.clear();
+            self.entries_version = entries_version;
+        }
+    }
+
+    pub fn get_layout(
+        &mut self,
+        entry_id: u64,
+        key: &EntryHeightKey,
+    ) -> Option<(f32, bool, Vec<String>)> {
+        match self.layouts.get(&entry_id) {
+            Some(cached) if &cached.key == key => {
+                self.hit_count += 1;
+                Some((
+                    cached.height,
+                    cached.show_control,
+                    cached.draw_lines.clone(),
+                ))
+            }
+            _ => {
+                self.miss_count += 1;
+                None
+            }
+        }
+    }
+
+    pub fn store_layout(
+        &mut self,
+        entry_id: u64,
+        key: EntryHeightKey,
+        height: f32,
+        show_control: bool,
+        draw_lines: Vec<String>,
+    ) {
+        self.layouts.insert(
+            entry_id,
+            CachedTextRowLayout {
+                key,
+                height,
+                show_control,
+                draw_lines,
+            },
+        );
+    }
 }
 
 /// Persistent UI interaction state (separate from [`crate::app::App`] history data).
@@ -143,6 +250,7 @@ pub struct UiState {
     pub settings_edit_max_entries: String,
     pub settings_edit_hotkey: String,
     pub settings_edit_max_image_mb: String,
+    pub settings_edit_jpeg_quality: String,
     pub settings_rects: SettingsRects,
     /// Gear button in the main header (opens settings).
     pub settings_button_rect: Option<WidgetRect>,
@@ -154,14 +262,30 @@ pub struct UiState {
     display_indices_key: Option<DisplayIndicesKey>,
     /// Count of actual `build_display_indices` runs (tests assert cache hits skip rebuild).
     pub display_indices_rebuild_count: u64,
+    /// Cached per-row layout from the last `refresh_list_layout` build.
+    pub(crate) cached_list_layout: Vec<history::EntryLayout>,
+    /// Last inputs used to build `cached_list_layout`.
+    list_layout_key: Option<ListLayoutKey>,
+    /// Count of actual `build_list_layout` runs (tests assert cache hits skip rebuild).
+    pub list_layout_rebuild_count: u64,
+    /// Bumped when `expanded_text_entries` changes; part of the list-layout cache key.
+    pub(crate) expanded_version: u64,
+    /// Per-entry text row heights (survives list-layout rebuilds when row inputs unchanged).
+    pub(crate) entry_height_cache: EntryHeightCache,
     /// Last frame's count of laid-out visible cards (for perf validation).
     pub last_visible_count: usize,
     /// Pre-downscaled image thumbnails (keyed by entry id; cleared on width resize).
     pub thumb_cache: ThumbCache,
+    /// In-flight async thumbnail loads for disk-backed image entries.
+    pub thumb_load_state: ThumbLoadState,
     /// Scaled preview pixmap for the open image modal (single slot; cleared on dismiss).
     pub preview_cache: Option<PreviewImageCache>,
     /// Reused across frames so text is not re-rasterized every paint.
     pub glyph_cache: GlyphCache,
+    /// Full-frame RGBA scratch for `render_app` (reallocated on client resize only).
+    pub(crate) scratch: Option<Pixmap>,
+    /// Last `(width, height)` used for `scratch` (invalidated when buffer is recreated).
+    scratch_size: (u32, u32),
     /// Last hover target; used to skip repaints on mouse-move when unchanged.
     pub hover_key: HoverKey,
     /// Text history cards expanded beyond the default line cap.
@@ -178,6 +302,24 @@ pub struct UiState {
     pub scrollbar_suppress_click: bool,
     /// Throttle fade repaints (~60 Hz).
     pub scrollbar_last_fade_tick: u32,
+    /// Wheel scroll offset changed but repaint was throttled (~60 Hz cap).
+    pub(crate) needs_scroll_repaint: bool,
+    /// Last history-list repaint driven by wheel scroll (`GetTickCount`).
+    pub(crate) last_scroll_repaint_tick: Option<u32>,
+}
+
+/// Minimum interval between wheel-driven history repaints (~60 Hz).
+pub const SCROLL_REPAINT_MIN_MS: u32 = 16;
+
+/// Whether `handle_input` should invalidate immediately after a wheel event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WheelRepaint {
+    /// Caller should `InvalidateRect` now.
+    Now,
+    /// Defer; caller should call `request_window_repaint` once (first event in burst).
+    Schedule,
+    /// Defer; a repaint is already scheduled for this burst.
+    Deferred,
 }
 
 impl UiState {
@@ -188,6 +330,92 @@ impl UiState {
             search_sel_anchor: 0,
             ..Self::default()
         }
+    }
+
+    /// Take the paint scratch buffer (reallocate when `(width, height)` changes).
+    /// Callers must return it via [`Self::return_scratch`] after painting.
+    pub(crate) fn take_scratch(&mut self, width: u32, height: u32) -> Option<Pixmap> {
+        if self.scratch_size != (width, height) {
+            self.scratch = Pixmap::new(width, height);
+            self.scratch_size = (width, height);
+        }
+        self.scratch.take()
+    }
+
+    pub(crate) fn return_scratch(&mut self, pixmap: Pixmap) {
+        self.scratch = Some(pixmap);
+    }
+
+    /// Apply completed worker replies; returns true when at least one thumb was inserted.
+    pub fn apply_thumb_replies(&mut self, replies: &[thumb_loader::ThumbLoadReply]) -> bool {
+        let mut changed = false;
+        for reply in replies {
+            if reply.generation != self.thumb_load_state.generation {
+                continue;
+            }
+            self.thumb_load_state
+                .inflight
+                .remove(&(reply.entry_id, reply.dst_w, reply.dst_h));
+            if let Some(pixmap) = &reply.pixmap {
+                self.thumb_cache.insert(
+                    reply.entry_id,
+                    reply.dst_w,
+                    reply.dst_h,
+                    Arc::clone(pixmap),
+                );
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Gate wheel-driven repaints to ~60 Hz; scroll offset must already be updated.
+    pub fn wheel_scroll_repaint(&mut self, now: u32) -> WheelRepaint {
+        match self.last_scroll_repaint_tick {
+            None => {
+                self.last_scroll_repaint_tick = Some(now);
+                self.needs_scroll_repaint = false;
+                WheelRepaint::Now
+            }
+            Some(last) if now.saturating_sub(last) >= SCROLL_REPAINT_MIN_MS => {
+                self.last_scroll_repaint_tick = Some(now);
+                self.needs_scroll_repaint = false;
+                WheelRepaint::Now
+            }
+            Some(_) => {
+                let schedule = !self.needs_scroll_repaint;
+                self.needs_scroll_repaint = true;
+                if schedule {
+                    WheelRepaint::Schedule
+                } else {
+                    WheelRepaint::Deferred
+                }
+            }
+        }
+    }
+
+    /// After `WM_PAINT`, clear a pending wheel repaint and stamp the throttle clock.
+    pub fn clear_scroll_repaint_after_paint(&mut self, now: u32) {
+        if self.needs_scroll_repaint {
+            self.needs_scroll_repaint = false;
+            self.last_scroll_repaint_tick = Some(now);
+        }
+    }
+
+    /// If wheel events were throttled and the interval has elapsed, request one more frame.
+    pub fn take_deferred_scroll_repaint(&mut self, now: u32) -> bool {
+        if !self.needs_scroll_repaint {
+            return false;
+        }
+        let Some(last) = self.last_scroll_repaint_tick else {
+            return false;
+        };
+        if now.saturating_sub(last) < SCROLL_REPAINT_MIN_MS {
+            return false;
+        }
+        self.last_scroll_repaint_tick = Some(now);
+        self.needs_scroll_repaint = false;
+        true
     }
 
     pub fn begin_frame(&mut self) {
@@ -235,6 +463,7 @@ impl UiState {
         self.settings_edit_max_entries = config.max_entries.to_string();
         self.settings_edit_hotkey = config.hotkey.clone();
         self.settings_edit_max_image_mb = format_max_image_edit(config.max_image_size_mb);
+        self.settings_edit_jpeg_quality = config.jpeg_quality.to_string();
         self.settings_rects = SettingsRects::default();
     }
 
@@ -245,6 +474,7 @@ impl UiState {
             SettingsFocus::MaxEntries => &self.settings_edit_max_entries,
             SettingsFocus::Hotkey => &self.settings_edit_hotkey,
             SettingsFocus::MaxImageSizeMb => &self.settings_edit_max_image_mb,
+            SettingsFocus::JpegQuality => &self.settings_edit_jpeg_quality,
         }
     }
 
@@ -253,6 +483,7 @@ impl UiState {
             SettingsFocus::MaxEntries => &mut self.settings_edit_max_entries,
             SettingsFocus::Hotkey => &mut self.settings_edit_hotkey,
             SettingsFocus::MaxImageSizeMb => &mut self.settings_edit_max_image_mb,
+            SettingsFocus::JpegQuality => &mut self.settings_edit_jpeg_quality,
             SettingsFocus::None => &mut self.settings_edit_max_entries,
         }
     }
@@ -308,6 +539,33 @@ impl UiState {
             query: app.filter_query.clone(),
         });
     }
+
+    /// Invalidate the list-layout cache when expand/collapse toggles.
+    pub(crate) fn bump_expanded_version(&mut self) {
+        self.expanded_version = self.expanded_version.wrapping_add(1);
+    }
+
+    pub(crate) fn store_list_layout_key(&mut self, app: &App, thumb_max_w: f32) {
+        self.list_layout_key = Some(ListLayoutKey {
+            entries_version: app.entries_version,
+            filter: self.filter,
+            query: app.filter_query.clone(),
+            expanded_version: self.expanded_version,
+            thumb_max_w_bucket: thumb_max_w as u32,
+        });
+    }
+}
+
+/// True when `cached_list_layout` already reflects current layout inputs.
+pub(crate) fn list_layout_key_matches(app: &App, ui: &UiState, thumb_max_w: f32) -> bool {
+    let Some(ref key) = ui.list_layout_key else {
+        return false;
+    };
+    key.entries_version == app.entries_version
+        && key.filter == ui.filter
+        && key.query == app.filter_query
+        && key.expanded_version == ui.expanded_version
+        && key.thumb_max_w_bucket == thumb_max_w as u32
 }
 
 pub fn entry_matches_filter(entry: &ClipEntry, filter: EntryFilter, query: &str) -> bool {
@@ -449,6 +707,42 @@ mod display_indices_cache_tests {
         refresh_display_indices(&app, &mut ui);
         assert!(ui.display_indices.is_empty());
         assert_eq!(ui.display_indices_rebuild_count, 1);
+    }
+}
+
+#[cfg(test)]
+mod wheel_scroll_repaint_tests {
+    use super::*;
+
+    #[test]
+    fn wheel_scroll_repaint_immediate_then_throttles() {
+        let mut ui = UiState::default();
+        assert_eq!(ui.wheel_scroll_repaint(0), WheelRepaint::Now);
+        assert_eq!(ui.wheel_scroll_repaint(5), WheelRepaint::Schedule);
+        assert_eq!(ui.wheel_scroll_repaint(10), WheelRepaint::Deferred);
+        assert!(ui.needs_scroll_repaint);
+        assert_eq!(ui.wheel_scroll_repaint(20), WheelRepaint::Now);
+        assert!(!ui.needs_scroll_repaint);
+    }
+
+    #[test]
+    fn deferred_scroll_repaint_after_interval() {
+        let mut ui = UiState::default();
+        assert_eq!(ui.wheel_scroll_repaint(100), WheelRepaint::Now);
+        assert_eq!(ui.wheel_scroll_repaint(105), WheelRepaint::Schedule);
+        assert!(!ui.take_deferred_scroll_repaint(110));
+        assert!(ui.take_deferred_scroll_repaint(100 + SCROLL_REPAINT_MIN_MS));
+        assert!(!ui.needs_scroll_repaint);
+    }
+
+    #[test]
+    fn clear_scroll_repaint_after_paint_clears_pending() {
+        let mut ui = UiState::default();
+        assert_eq!(ui.wheel_scroll_repaint(0), WheelRepaint::Now);
+        assert_eq!(ui.wheel_scroll_repaint(1), WheelRepaint::Schedule);
+        ui.clear_scroll_repaint_after_paint(8);
+        assert!(!ui.needs_scroll_repaint);
+        assert_eq!(ui.last_scroll_repaint_tick, Some(8));
     }
 }
 

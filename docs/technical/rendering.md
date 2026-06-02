@@ -22,7 +22,7 @@ Glyphs come from [`glyph_raster::rasterize_glyph`](../../src/win32/glyph_raster.
 - Load Roboto from memory via `AddFontMemResourceEx` (kept alive for the process; cached `HFONT` per size).
 - Measure with `GetTextMetricsW` (ascent/height), `GetTextExtentPoint32W` (advance), and `GetCharABCWidthsFloatW` (left/right bearings, used to pad the cell so overhanging ink is not clipped).
 - Ink: draw the glyph **baseline-aligned** (`SetTextAlign(TA_LEFT | TA_BASELINE)` then `TextOutW`) as white-on-black onto an offscreen 32-bpp DIB sized to the metrics cell plus a small margin, then **trim to the inked bounding box**. Reported `left`/`top` are offsets from the pen origin / baseline.
-- Fallback: Segoe UI if Roboto returns empty ink (e.g. glyphs not in Roboto).
+- Fallback: Segoe UI when Roboto has no cmap entry for the character (`GetGlyphIndicesW` + `GGI_MARK_UNAVAIL`) or when rasterized ink is empty. Without the cmap check, GDI draws a `.notdef` tofu box that still has pixels, so the old empty-ink-only fallback never ran (e.g. U+2011 non-breaking hyphen in “WIC‑based”).
 - U+2026 (`…`) uses a hand-stamped three-dot glyph (truncate suffix) so ellipsis always renders.
 
 > ⚠️ **`GdiFlush` is mandatory.** GDI batches drawing into a `CreateDIBSection` bitmap, so `glyph_raster::draw_text_cell` calls `GdiFlush()` after `TextOutW` and **before** reading the section bits. Skipping it returns half-written scanlines — text appears "horizontally shredded" with dropped rows. (The window back-buffer in `gdi.rs` is exempt because it writes its DIB via CPU memcpy, never GDI drawing calls.) The DIB section is created with a **null `HDC`** so it is always a true 32-bpp section, regardless of the monochrome memory DC.

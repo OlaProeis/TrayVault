@@ -1,7 +1,7 @@
 //! Settings panel input: toggles, text fields, theme chips, scroll.
 
 use crate::app::App;
-use crate::config::ThemeMode;
+use crate::config::{ImageBlobCodec, ThemeMode};
 use crate::log;
 use crate::ui::search_edit::{caret_at_click, has_selection, selection_range};
 use crate::ui::settings::{settings_content_height, GITHUB_REPO_URL};
@@ -36,10 +36,15 @@ impl SettingsHooks {
     }
 }
 
-pub fn handle_settings_wheel(ui: &mut UiState, delta: i32, viewport_height: i32) -> bool {
+pub fn handle_settings_wheel(
+    ui: &mut UiState,
+    config: &crate::config::Config,
+    delta: i32,
+    viewport_height: i32,
+) -> bool {
     let viewport_h =
         (viewport_height.max(0) as f32 - titlebar::TITLE_BAR_HEIGHT - HEADER_H - FOOTER_H).max(0.0);
-    let max_scroll = (settings_content_height() - viewport_h).max(0.0);
+    let max_scroll = (settings_content_height(config) - viewport_h).max(0.0);
     let scroll_amount = -(delta as f32) / WHEEL_DELTA * 36.0;
     ui.settings_scroll = (ui.settings_scroll + scroll_amount).clamp(0.0, max_scroll);
     true
@@ -128,6 +133,14 @@ pub fn handle_settings_mouse_up(
         changed = apply_theme(app, ui, ThemeMode::Dark);
     } else if rect_clicked(rects.theme_system, x, y) {
         changed = apply_theme(app, ui, ThemeMode::System);
+    } else if rect_clicked(rects.blob_codec_png, x, y) {
+        changed = apply_blob_codec(app, ui, ImageBlobCodec::Png);
+    } else if rect_clicked(rects.blob_codec_jpeg, x, y) {
+        changed = apply_blob_codec(app, ui, ImageBlobCodec::Jpeg);
+    } else if rect_clicked(rects.jpeg_quality, x, y) {
+        commit_text_field(app, ui, hooks, monitor);
+        focus_settings_field(ui, cache, SettingsFocus::JpegQuality, rects.jpeg_quality, x);
+        changed = true;
     } else if rect_clicked(rects.max_entries, x, y) {
         commit_text_field(app, ui, hooks, monitor);
         focus_settings_field(ui, cache, SettingsFocus::MaxEntries, rects.max_entries, x);
@@ -321,6 +334,7 @@ fn settings_char_allowed(focus: SettingsFocus, c: char) -> bool {
         SettingsFocus::None => false,
         SettingsFocus::MaxEntries => c.is_ascii_digit(),
         SettingsFocus::MaxImageSizeMb => c.is_ascii_digit() || c == '.',
+        SettingsFocus::JpegQuality => c.is_ascii_digit(),
         SettingsFocus::Hotkey => true,
     }
 }
@@ -430,6 +444,7 @@ fn commit_text_field(
         SettingsFocus::MaxEntries => commit_max_entries(app, ui),
         SettingsFocus::Hotkey => commit_hotkey(app, ui, hooks),
         SettingsFocus::MaxImageSizeMb => commit_max_image_mb(app, ui, monitor),
+        SettingsFocus::JpegQuality => commit_jpeg_quality(app, ui),
     }
 }
 
@@ -479,6 +494,49 @@ fn commit_hotkey(app: &mut App, ui: &mut UiState, hooks: &SettingsHooks) -> bool
     ui.settings_edit_hotkey = app.config.hotkey.clone();
     ui.settings_error = None;
     true
+}
+
+fn apply_blob_codec(app: &mut App, ui: &mut UiState, codec: ImageBlobCodec) -> bool {
+    if app.config.image_blob_codec == codec {
+        return false;
+    }
+    match app.set_image_blob_codec(codec) {
+        Ok(()) => {
+            ui.settings_edit_jpeg_quality = app.config.jpeg_quality.to_string();
+            ui.settings_error = None;
+            true
+        }
+        Err(err) => {
+            ui.settings_error = Some(format!("Image codec: {err}"));
+            false
+        }
+    }
+}
+
+fn commit_jpeg_quality(app: &mut App, ui: &mut UiState) -> bool {
+    let text = ui.settings_edit_jpeg_quality.trim();
+    let Ok(value) = text.parse::<u32>() else {
+        ui.settings_error = Some("JPEG quality must be an integer 1–100".into());
+        ui.settings_edit_jpeg_quality = app.config.jpeg_quality.to_string();
+        return false;
+    };
+    if !(1..=100).contains(&value) {
+        ui.settings_error = Some("JPEG quality must be between 1 and 100".into());
+        ui.settings_edit_jpeg_quality = app.config.jpeg_quality.to_string();
+        return false;
+    }
+    match app.set_jpeg_quality(value as u8) {
+        Ok(()) => {
+            ui.settings_edit_jpeg_quality = app.config.jpeg_quality.to_string();
+            ui.settings_error = None;
+            true
+        }
+        Err(err) => {
+            ui.settings_error = Some(format!("JPEG quality: {err}"));
+            ui.settings_edit_jpeg_quality = app.config.jpeg_quality.to_string();
+            false
+        }
+    }
 }
 
 fn commit_max_image_mb(app: &mut App, ui: &mut UiState, monitor: &mut ClipboardMonitor) -> bool {

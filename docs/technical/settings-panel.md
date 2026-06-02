@@ -30,6 +30,8 @@ Modules: `src/ui/settings.rs`, `src/ui/settings_input.rs`, `src/ui/input.rs`, `s
 | Close on copy | `close_on_copy` | `App::copy_entry_to_clipboard` hide behavior |
 | Show in taskbar when open | `show_in_taskbar` | Toggles `WS_EX_TOOLWINDOW` on the main window while visible; applies immediately if the window is open. See [`window-gdi.md`](window-gdi.md) (Taskbar visibility). |
 | Max image size (MB) | `max_image_size_mb` | `CaptureConfig.max_image_size_bytes` |
+| Image blob codec | `image_blob_codec` | `"png"` (default, lossless) or `"jpeg"`; affects **new** blob writes only |
+| JPEG quality | `jpeg_quality` | 1–100 (default 90); shown only when codec is JPEG; lossy paste when JPEG |
 | Start with Windows | `autostart` | Run key via `App::set_autostart`; revert + inline error on failure |
 
 ## About (read-only)

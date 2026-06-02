@@ -61,7 +61,7 @@ Custom chrome is 28px tall ([`titlebar.rs`](../../src/ui/titlebar.rs)). `on_nc_h
 
 - **Settings and close buttons** (right 56px): `HTCLIENT` so left-up reaches [`input.rs`](../../src/ui/input.rs).
 - **Search field** and any remaining title-bar gap: `HTCAPTION` so Windows handles drag natively. A click without movement in the search field is recovered on `WM_NCLBUTTONUP` (≤4px slop) and forwarded as `LButtonUp` to focus the field and place the caret — see [`ui-views.md`](ui-views.md) (Search and filters).
-- **Do not** call `SendMessageW(WM_SYSCOMMAND, SC_MOVE | HTCAPTION)` from `on_input` while `App`/`UiState` `RefCell` borrows are active — that re-enters `WndProc` and panics (`RefCell already mutably borrowed` / `STATUS_STACK_BUFFER_OVERRUN`).
+- **Do not** call synchronous Win32 APIs from `on_input` that re-enter `WndProc` while `App`/`UiState` `RefCell` borrows are active — e.g. `SendMessageW(WM_SYSCOMMAND, SC_MOVE | HTCAPTION)` or `ReleaseCapture()` (history scrollbar drag end). Both can crash with `RefCell already mutably borrowed` / `STATUS_STACK_BUFFER_OVERRUN`. Use native `HTCAPTION` drag instead of `SC_MOVE`; defer `WM_CAPTURECHANGED` to after `dispatch` returns (see [`message-loop-callbacks.md`](message-loop-callbacks.md)).
 
 ### Borderless frame (no gray system border)
 

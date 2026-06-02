@@ -31,12 +31,13 @@ use ffi::{
     HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND, IDC_ARROW, LPARAM, LRESULT, MARGINS, MSG, POINT,
     RECT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, UINT,
-    VK_SHIFT, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETICON, WM_HOTKEY, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE,
-    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WPARAM, WS_BORDERLESS, WS_CAPTION,
-    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+    VK_SHIFT, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE,
+    WM_COMMAND, WM_DESTROY, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETICON,
+    WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_MOVE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    WM_NCLBUTTONUP, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WPARAM,
+    WS_BORDERLESS, WS_CAPTION, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+    WS_THICKFRAME,
 };
 
 // ---------------------------------------------------------------------------
@@ -55,6 +56,8 @@ const SEARCH_CLICK_SLOP: i32 = 4;
 const TIMER_ID: usize = 1;
 /// Tray callback message id (Task 10).
 pub const WM_TRAY_CALLBACK: UINT = WM_APP + 1;
+/// Async thumbnail load completed (Task 39).
+pub const WM_THUMB_READY: UINT = WM_APP + 2;
 
 /// `WM_SIZE` wParam: window is minimized.
 const SIZE_MINIMIZED: WPARAM = 1;
@@ -78,6 +81,8 @@ pub enum InputEvent {
     RButtonDown(i32, i32),
     RButtonUp(i32, i32),
     MouseWheel(i32, i32, i16),
+    /// Mouse capture left this window (e.g. system stole capture during scrollbar drag).
+    CaptureLost,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +102,8 @@ pub struct WindowCallbacks {
     /// Invoked after the user finishes a move or resize (`WM_EXITSIZEMOVE`).
     pub on_geometry_changed: Option<Box<dyn FnMut()>>,
     pub on_paint: Option<Box<dyn FnMut(&mut GdiBuffer)>>,
+    /// Invoked when a background thumbnail load posts [`WM_THUMB_READY`].
+    pub on_thumb_ready: Option<Box<dyn FnMut()>>,
     pub on_input: Option<Box<dyn FnMut(InputEvent, HWND, i32, i32)>>,
     /// Return true to force `HTCLIENT` instead of a right-edge resize grip (scrollbar gutter).
     pub on_nc_client_override: Option<Box<dyn FnMut(i32, i32, i32, i32) -> bool>>,
@@ -116,6 +123,9 @@ pub struct Window {
     search_nc_down: Cell<Option<(i32, i32)>>,
     /// True during the modal move/resize loop (`WM_ENTERSIZEMOVE` … `WM_EXITSIZEMOVE`).
     in_size_move: Cell<bool>,
+    /// `WM_CAPTURECHANGED` deferred until `dispatch` returns (avoids re-entering `on_input`
+    /// while `RefCell` borrows from the current message are still active).
+    pending_capture_lost: Cell<bool>,
     /// Application icon set via `WM_SETICON` (small + large). Destroyed on drop.
     icon: ffi::HICON,
 }
@@ -188,6 +198,7 @@ impl Window {
             visible: Cell::new(false),
             search_nc_down: Cell::new(None),
             in_size_move: Cell::new(false),
+            pending_capture_lost: Cell::new(false),
             icon,
         };
 
@@ -269,12 +280,13 @@ impl Window {
     fn dispatch(&mut self, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         log_message(msg);
 
-        match msg {
+        let result = match msg {
             WM_PAINT => self.on_paint(),
             WM_TIMER => self.on_timer(wparam),
             WM_HOTKEY => self.on_hotkey(wparam),
             WM_CLIPBOARDUPDATE => self.on_clipboard_update(),
             WM_TRAY_CALLBACK => self.on_tray(wparam, lparam),
+            WM_THUMB_READY => self.on_thumb_ready(),
             WM_COMMAND => self.on_command(wparam),
             WM_ENTERSIZEMOVE => {
                 self.in_size_move.set(true);
@@ -300,6 +312,7 @@ impl Window {
             WM_SIZE => self.on_size(wparam, lparam),
             WM_KEYDOWN => self.on_key_down(wparam),
             WM_CHAR => self.on_char(wparam),
+            WM_CAPTURECHANGED => self.on_capture_changed(lparam),
             WM_MOUSEMOVE => self.on_mouse_move(lparam),
             WM_LBUTTONDOWN => self.on_lbutton_down(lparam),
             WM_LBUTTONUP => self.on_lbutton_up(lparam),
@@ -361,7 +374,9 @@ impl Window {
                 // SAFETY: delegate unhandled messages to the default handler.
                 unsafe { DefWindowProcW(self.hwnd, msg, wparam, lparam) }
             }
-        }
+        };
+        self.flush_pending_capture_lost();
+        result
     }
 
     fn on_paint(&mut self) -> LRESULT {
@@ -416,6 +431,13 @@ impl Window {
     fn on_tray(&mut self, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if let Some(ref mut hook) = self.callbacks.on_tray {
             hook(wparam, lparam);
+        }
+        0
+    }
+
+    fn on_thumb_ready(&mut self) -> LRESULT {
+        if let Some(ref mut hook) = self.callbacks.on_thumb_ready {
+            hook();
         }
         0
     }
@@ -481,6 +503,28 @@ impl Window {
             self.request_repaint();
         }
         0
+    }
+
+    fn on_capture_changed(&mut self, lparam: LPARAM) -> LRESULT {
+        let gaining = lparam as HWND;
+        if gaining != self.hwnd {
+            self.pending_capture_lost.set(true);
+        }
+        0
+    }
+
+    fn flush_pending_capture_lost(&mut self) {
+        if !self.pending_capture_lost.replace(false) {
+            return;
+        }
+        if let Some(ref mut hook) = self.callbacks.on_input {
+            hook(
+                InputEvent::CaptureLost,
+                self.hwnd,
+                self.gdi.width(),
+                self.gdi.height(),
+            );
+        }
     }
 
     fn on_mouse_move(&mut self, lparam: LPARAM) -> LRESULT {

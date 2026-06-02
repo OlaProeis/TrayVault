@@ -3,7 +3,7 @@
 use crate::app::App;
 use crate::models::EntryKind;
 use crate::ui::history::{
-    build_list_layout, ensure_index_visible, entry_inner_width, hit_test_entry,
+    ensure_index_visible, entry_inner_width, hit_test_entry, refresh_list_layout,
     total_content_height,
 };
 use crate::ui::scroll_bar::{layout_for_list, scroll_offset_for_thumb_y};
@@ -18,12 +18,13 @@ use crate::ui::settings_input::{
 };
 use crate::ui::widgets::{context_menu_labels, hit_test_context_menu, PADDING};
 use crate::ui::EntryFilter;
-use crate::ui::{HoverKey, UiState};
+use crate::ui::{HoverKey, UiState, WheelRepaint};
 use crate::win32::clipboard::ClipboardMonitor;
 use crate::win32::ffi::{
-    GetKeyState, HWND, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_LEFT,
-    VK_OEM_2, VK_RETURN, VK_RIGHT, VK_UP,
+    GetKeyState, SetCapture, HWND, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1,
+    VK_HOME, VK_LEFT, VK_NEXT, VK_OEM_2, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_UP,
 };
+use crate::win32::window::request_window_repaint;
 use crate::win32::window::{hide_window, InputEvent};
 
 const WHEEL_DELTA: f32 = 120.0;
@@ -56,12 +57,15 @@ pub fn handle_input(
                 ui.touch_scrollbar();
                 return true;
             }
-            if gutter_hits_scrollbar(app, ui, viewport, x as f32, y as f32) {
+            let gutter_hit = gutter_hits_scrollbar(app, ui, viewport, x as f32, y as f32);
+            if gutter_hit {
                 ui.touch_scrollbar();
             }
-            ui.hover_key = hover_key_at(app, ui, viewport, x as f32, y as f32);
-            // Repaint every move so card hover tracks the cursor; HoverKey alone is too coarse
-            // (card draw uses tighter bounds than a row-only hit test).
+            let new_hover = hover_key_at(app, ui, viewport, x as f32, y as f32);
+            if !mouse_move_needs_repaint(gutter_hit, ui.hover_key, new_hover) {
+                return false;
+            }
+            ui.hover_key = new_hover;
             true
         }
         InputEvent::LButtonDown(x, y) => {
@@ -72,10 +76,18 @@ pub fn handle_input(
             }
             true
         }
+        InputEvent::CaptureLost => {
+            let was_dragging = ui.scrollbar_drag_grab_y.is_some();
+            end_scrollbar_drag(ui);
+            if was_dragging {
+                ui.scrollbar_suppress_click = false;
+            }
+            was_dragging
+        }
         InputEvent::LButtonUp(x, y) => {
             ui.on_left_up(x as f32, y as f32);
             let suppress = ui.scrollbar_suppress_click;
-            ui.scrollbar_drag_grab_y = None;
+            end_scrollbar_drag(ui);
             ui.scrollbar_suppress_click = false;
             if handle_title_bar_close(app, viewport, ui, x as f32, y as f32) {
                 return true;
@@ -120,24 +132,25 @@ pub fn handle_input(
         }
         InputEvent::MouseWheel(_, _, delta) => {
             if ui.show_settings {
-                return handle_settings_wheel(ui, delta as i32, viewport.height);
+                return handle_settings_wheel(ui, &app.config, delta as i32, viewport.height);
             }
             let scroll_amount = -(delta as f32) / WHEEL_DELTA * 48.0;
-            refresh_display_indices(app, ui);
             let thumb_max_w = entry_inner_width(viewport.width.max(0) as f32);
-            let layouts = build_list_layout(
-                &ui.display_indices,
-                &app.entries,
-                thumb_max_w,
-                &mut ui.glyph_cache,
-                &ui.expanded_text_entries,
-            );
-            let content_h = total_content_height(&layouts);
+            refresh_list_layout(app, ui, thumb_max_w);
+            let content_h = total_content_height(&ui.cached_list_layout);
             let viewport_h = content_viewport_height(viewport.height.max(0) as f32);
             ui.scroll_offset =
                 (ui.scroll_offset + scroll_amount).clamp(0.0, (content_h - viewport_h).max(0.0));
             ui.touch_scrollbar();
-            true
+            let now = crate::ui::scroll_bar::tick_now();
+            match ui.wheel_scroll_repaint(now) {
+                WheelRepaint::Now => true,
+                WheelRepaint::Schedule => {
+                    request_window_repaint(viewport.hwnd);
+                    false
+                }
+                WheelRepaint::Deferred => false,
+            }
         }
         InputEvent::KeyDown(vk) => handle_key_down(vk, app, ui, viewport, monitor, settings_hooks),
         InputEvent::Char(ch) => handle_char(ch, app, ui, settings_hooks, monitor),
@@ -213,6 +226,14 @@ fn handle_key_down(
             refresh_display_indices(app, ui);
             move_selection(app, ui, 1);
             clamp_scroll_to_selection(app, ui, viewport);
+            true
+        }
+        VK_PRIOR => {
+            scroll_history_by_page(app, ui, viewport, -1.0);
+            true
+        }
+        VK_NEXT => {
+            scroll_history_by_page(app, ui, viewport, 1.0);
             true
         }
         VK_RETURN => {
@@ -481,23 +502,17 @@ fn handle_main_mouse_up(
             } else {
                 ui.expanded_text_entries.insert(entry_id);
             }
+            ui.bump_expanded_version();
             return;
         }
     }
 
-    refresh_display_indices(app, ui);
     let thumb_max_w = entry_inner_width(viewport.width.max(0) as f32);
-    let layouts = build_list_layout(
-        &ui.display_indices,
-        &app.entries,
-        thumb_max_w,
-        &mut ui.glyph_cache,
-        &ui.expanded_text_entries,
-    );
+    refresh_list_layout(app, ui, thumb_max_w);
     let content_top = header_total_height();
     let content_w = list_content_width(viewport);
     if let Some(idx) = hit_test_entry(
-        &layouts,
+        &ui.cached_list_layout,
         ui.scroll_offset,
         content_top,
         PADDING,
@@ -536,19 +551,12 @@ fn handle_title_bar_close(app: &mut App, viewport: Viewport, ui: &UiState, x: f3
 }
 
 fn try_open_image_preview(app: &App, ui: &mut UiState, viewport: Viewport, x: f32, y: f32) {
-    refresh_display_indices(app, ui);
     let thumb_max_w = entry_inner_width(viewport.width.max(0) as f32);
-    let layouts = build_list_layout(
-        &ui.display_indices,
-        &app.entries,
-        thumb_max_w,
-        &mut ui.glyph_cache,
-        &ui.expanded_text_entries,
-    );
+    refresh_list_layout(app, ui, thumb_max_w);
     let content_top = header_total_height();
     let content_w = list_content_width(viewport);
     if let Some(idx) = hit_test_entry(
-        &layouts,
+        &ui.cached_list_layout,
         ui.scroll_offset,
         content_top,
         PADDING,
@@ -562,18 +570,31 @@ fn try_open_image_preview(app: &App, ui: &mut UiState, viewport: Viewport, x: f3
     }
 }
 
+fn scroll_history_by_page(app: &App, ui: &mut UiState, viewport: Viewport, pages: f32) {
+    let thumb_max_w = entry_inner_width(viewport.width.max(0) as f32);
+    refresh_list_layout(app, ui, thumb_max_w);
+    let content_h = total_content_height(&ui.cached_list_layout);
+    let viewport_h = content_viewport_height(viewport.height.max(0) as f32);
+    ui.scroll_offset = apply_page_scroll(ui.scroll_offset, pages, content_h, viewport_h);
+    ui.touch_scrollbar();
+}
+
+/// Scroll offset after moving by `pages` × visible list height (clamped).
+fn apply_page_scroll(scroll_offset: f32, pages: f32, content_h: f32, viewport_h: f32) -> f32 {
+    let max_scroll = (content_h - viewport_h).max(0.0);
+    (scroll_offset + pages * viewport_h).clamp(0.0, max_scroll)
+}
+
 fn clamp_scroll_to_selection(app: &App, ui: &mut UiState, viewport: Viewport) {
     let thumb_max_w = entry_inner_width(viewport.width.max(0) as f32);
-    let layouts = build_list_layout(
-        &ui.display_indices,
-        &app.entries,
-        thumb_max_w,
-        &mut ui.glyph_cache,
-        &ui.expanded_text_entries,
-    );
+    refresh_list_layout(app, ui, thumb_max_w);
     let viewport_h = content_viewport_height(viewport.height.max(0) as f32);
-    ui.scroll_offset =
-        ensure_index_visible(&layouts, app.selected_index, ui.scroll_offset, viewport_h);
+    ui.scroll_offset = ensure_index_visible(
+        &ui.cached_list_layout,
+        app.selected_index,
+        ui.scroll_offset,
+        viewport_h,
+    );
     ui.touch_scrollbar();
 }
 
@@ -596,6 +617,10 @@ fn try_scrollbar_press(app: &App, ui: &mut UiState, viewport: Viewport, x: f32, 
     ui.touch_scrollbar();
     if bar.thumb_contains(x, y) {
         ui.scrollbar_drag_grab_y = Some(y - bar.thumb_y);
+        // SAFETY: `viewport.hwnd` is the live main window during client input.
+        unsafe {
+            let _ = SetCapture(viewport.hwnd);
+        }
         return;
     }
     let page = bar.track_h * 0.9;
@@ -604,6 +629,13 @@ fn try_scrollbar_press(app: &App, ui: &mut UiState, viewport: Viewport, x: f32, 
     } else if y > bar.thumb_y + bar.thumb_h {
         ui.scroll_offset = (ui.scroll_offset + page).min(bar.max_scroll);
     }
+}
+
+fn end_scrollbar_drag(ui: &mut UiState) {
+    // Do not call `ReleaseCapture` here — it sends `WM_CAPTURECHANGED` synchronously,
+    // re-entering `WndProc` while `App`/`UiState` `RefCell`s are borrowed (see
+    // `window.rs` HTCAPTION note). Windows releases capture on `LButtonUp` anyway.
+    ui.scrollbar_drag_grab_y = None;
 }
 
 fn update_scrollbar_drag(app: &App, ui: &mut UiState, viewport: Viewport, y: f32) {
@@ -618,6 +650,11 @@ fn update_scrollbar_drag(app: &App, ui: &mut UiState, viewport: Viewport, y: f32
     };
     let thumb_y = (y - grab).clamp(bar.track_top, bar.track_top + bar.track_h - bar.thumb_h);
     ui.scroll_offset = scroll_offset_for_thumb_y(&bar, thumb_y);
+}
+
+/// Main-view `MouseMove`: repaint when hover target changes or scrollbar gutter is active.
+fn mouse_move_needs_repaint(gutter_hit: bool, prev: HoverKey, next: HoverKey) -> bool {
+    gutter_hit || prev != next
 }
 
 fn hover_key_at(app: &App, ui: &mut UiState, viewport: Viewport, x: f32, y: f32) -> HoverKey {
@@ -637,19 +674,12 @@ fn hover_key_at(app: &App, ui: &mut UiState, viewport: Viewport, x: f32, y: f32)
 
     let content_bottom = client_h - footer_total_height();
     let entry_index = if y >= header_total_height() && y < content_bottom {
-        refresh_display_indices(app, ui);
         let thumb_max_w = entry_inner_width(viewport.width.max(0) as f32);
-        let layouts = build_list_layout(
-            &ui.display_indices,
-            &app.entries,
-            thumb_max_w,
-            &mut ui.glyph_cache,
-            &ui.expanded_text_entries,
-        );
+        refresh_list_layout(app, ui, thumb_max_w);
         let content_top = header_total_height();
         let content_w = list_content_width(viewport);
         hit_test_entry(
-            &layouts,
+            &ui.cached_list_layout,
             ui.scroll_offset,
             content_top,
             PADDING,
@@ -675,7 +705,47 @@ fn list_content_width(viewport: Viewport) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_char_boundary, prev_char_boundary};
+    use super::{
+        apply_page_scroll, mouse_move_needs_repaint, next_char_boundary, prev_char_boundary,
+    };
+    use crate::ui::HoverKey;
+
+    #[test]
+    fn apply_page_scroll_moves_one_viewport_and_clamps() {
+        assert_eq!(apply_page_scroll(0.0, 1.0, 500.0, 200.0), 200.0);
+        assert_eq!(apply_page_scroll(200.0, 1.0, 500.0, 200.0), 300.0);
+        assert_eq!(apply_page_scroll(250.0, 1.0, 500.0, 200.0), 300.0);
+        assert_eq!(apply_page_scroll(100.0, -1.0, 500.0, 200.0), 0.0);
+        assert_eq!(apply_page_scroll(50.0, -1.0, 150.0, 200.0), 0.0);
+    }
+
+    #[test]
+    fn mouse_move_needs_repaint_on_hover_change_or_gutter() {
+        let prev = HoverKey {
+            entry_index: Some(0),
+            filter_chip: 0,
+            settings: false,
+            close: false,
+        };
+        assert!(!mouse_move_needs_repaint(false, prev, prev));
+        assert!(mouse_move_needs_repaint(
+            false,
+            prev,
+            HoverKey {
+                entry_index: Some(1),
+                ..prev
+            }
+        ));
+        assert!(mouse_move_needs_repaint(
+            false,
+            prev,
+            HoverKey {
+                settings: true,
+                ..prev
+            }
+        ));
+        assert!(mouse_move_needs_repaint(true, prev, prev));
+    }
 
     #[test]
     fn next_char_boundary_ascii() {

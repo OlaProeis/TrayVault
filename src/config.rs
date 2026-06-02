@@ -40,6 +40,52 @@ pub enum ThemeMode {
     System,
 }
 
+/// On-disk image blob codec for new writes (`config.toml`: `image_blob_codec`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageBlobCodec {
+    Png,
+    Jpeg,
+}
+
+impl ImageBlobCodec {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "png" => Some(Self::Png),
+            "jpeg" => Some(Self::Jpeg),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpeg",
+        }
+    }
+}
+
+impl Default for ImageBlobCodec {
+    fn default() -> Self {
+        Self::Png
+    }
+}
+
+/// Snapshot of blob-write settings passed to the storage worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobWriteConfig {
+    pub codec: ImageBlobCodec,
+    pub jpeg_quality: u8,
+}
+
+impl BlobWriteConfig {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            codec: config.image_blob_codec,
+            jpeg_quality: config.jpeg_quality,
+        }
+    }
+}
+
 impl ThemeMode {
     fn parse(s: &str) -> Option<Self> {
         match s {
@@ -74,6 +120,10 @@ pub struct Config {
     pub show_in_taskbar: bool,
     pub pause_capture: bool,
     pub max_image_size_mb: f32,
+    /// Codec for new image blobs (`png` or `jpeg`).
+    pub image_blob_codec: ImageBlobCodec,
+    /// JPEG quality 1–100 when `image_blob_codec` is `jpeg`.
+    pub jpeg_quality: u8,
     /// Last window top-left (screen coords). `None` until the user has moved the window once.
     pub window_x: Option<i32>,
     pub window_y: Option<i32>,
@@ -96,6 +146,8 @@ impl Default for Config {
             show_in_taskbar: true,
             pause_capture: false,
             max_image_size_mb: 5.0,
+            image_blob_codec: ImageBlobCodec::Png,
+            jpeg_quality: 90,
             window_x: None,
             window_y: None,
             window_client_w: DEFAULT_WINDOW_CLIENT_W,
@@ -199,6 +251,8 @@ impl Config {
              show_in_taskbar = {}\n\
              pause_capture = {}\n\
              max_image_size_mb = {}\n\
+             image_blob_codec = \"{}\"\n\
+             jpeg_quality = {}\n\
              window_client_w = {}\n\
              window_client_h = {}\n",
             self.max_entries,
@@ -212,6 +266,8 @@ impl Config {
             self.show_in_taskbar,
             self.pause_capture,
             format_float(self.max_image_size_mb),
+            self.image_blob_codec.as_str(),
+            self.jpeg_quality,
             self.window_client_w,
             self.window_client_h,
         );
@@ -334,6 +390,19 @@ fn apply_key(config: &mut Config, key: &str, raw_value: &str) -> std::result::Re
                 ));
             }
         }
+        "image_blob_codec" => {
+            let value = parse_quoted_string(raw_value).unwrap_or_else(|| raw_value.to_string());
+            config.image_blob_codec = ImageBlobCodec::parse(&value).ok_or_else(|| {
+                format!("invalid image_blob_codec `{value}` (expected png or jpeg)")
+            })?;
+        }
+        "jpeg_quality" => {
+            let q = parse_u32(raw_value).ok_or_else(|| format!("invalid integer `{raw_value}`"))?;
+            if !(1..=100).contains(&q) {
+                return Err(format!("jpeg_quality must be 1–100, got `{raw_value}`"));
+            }
+            config.jpeg_quality = q as u8;
+        }
         "window_x" => {
             config.window_x =
                 Some(parse_i32(raw_value).ok_or_else(|| format!("invalid integer `{raw_value}`"))?);
@@ -414,6 +483,11 @@ pub fn validate_config(config: &Config) -> Result<()> {
     if !config.max_image_size_mb.is_finite() || config.max_image_size_mb <= 0.0 {
         return Err(ClipError::Config(
             "max_image_size_mb must be a positive finite number".into(),
+        ));
+    }
+    if !(1..=100).contains(&config.jpeg_quality) {
+        return Err(ClipError::Config(
+            "jpeg_quality must be between 1 and 100".into(),
         ));
     }
     Ok(())
@@ -598,6 +672,8 @@ mod tests {
             show_in_taskbar: false,
             pause_capture: true,
             max_image_size_mb: 2.5,
+            image_blob_codec: ImageBlobCodec::Jpeg,
+            jpeg_quality: 85,
             window_x: Some(42),
             window_y: Some(24),
             window_client_w: 1100,

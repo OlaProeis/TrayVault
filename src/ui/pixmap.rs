@@ -57,7 +57,7 @@ impl Color {
 }
 
 /// Top-down RGBA8 pixmap (same layout as the former tiny-skia buffer).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Pixmap {
     width: u32,
     height: u32,

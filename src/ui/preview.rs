@@ -127,7 +127,7 @@ fn build_and_store_preview(
         .image_pixels
         .as_deref()
         .map(|p| p.to_vec())
-        .or_else(|| store.read_blob(&img.hash))?;
+        .or_else(|| store.read_blob(&img.hash, img.width, img.height))?;
 
     let pixmap = build_preview_pixmap(&pixel_buf, img.width, img.height, dst_w, dst_h)?;
     let arc = match preview_cache {
@@ -197,6 +197,7 @@ pub fn draw_help_overlay(pixmap: &mut Pixmap, cache: &mut GlyphCache, theme: &Th
         "TrayVault Help",
         "",
         "↑ / ↓     Move selection",
+        "PgUp/Dn   Scroll one page",
         "Enter     Copy selected entry",
         "Esc       Clear search / close",
         "F1 / ?    Toggle this help",

@@ -39,10 +39,16 @@ Tray, command, hotkey, close, and geometry callbacks receive **`HWND` (Copy)**, 
 
 Registered in `wire_callbacks` as `WindowCallbacks::on_geometry_changed`. Fired from `WM_EXITSIZEMOVE` after a modal move/resize ends. The closure calls `App::persist_window_geometry(hwnd, config_path)` — no `&Window` borrow extension beyond the existing `dispatch` frame. See [`config.md`](config.md) (Window placement).
 
+### Deferred `WM_CAPTURECHANGED`
+
+History scrollbar thumb drag uses `SetCapture` so drag continues outside the client rect. Losing capture posts `WM_CAPTURECHANGED`, which would otherwise call `on_input` **inside** the current message handler (e.g. synchronously during `LButtonUp` if `ReleaseCapture()` were called from input code).
+
+`Window::on_capture_changed` sets `pending_capture_lost` when another HWND gains capture; `flush_pending_capture_lost` runs at the end of `dispatch()` and forwards `InputEvent::CaptureLost` to clear `scrollbar_drag_grab_y`. Drag end on mouse-up only clears UI state — no explicit `ReleaseCapture()`.
+
 ## Invariants (unchanged)
 
 - **HTCAPTION drag** — search field and title-bar gaps still use native caption drag via `WM_NCHITTEST`; synthetic search clicks via `WM_NCLBUTTONUP`.
-- **No re-entrant `SendMessage(SC_MOVE)`** while `App` / `UiState` `RefCell` borrows are active — still panics if violated.
+- **No re-entrant Win32 calls from `on_input`** while `App` / `UiState` `RefCell` borrows are active — e.g. `SendMessage(WM_SYSCOMMAND, SC_MOVE)`, or `ReleaseCapture()` (both can synchronously re-enter `WndProc` and crash with `RefCell already mutably borrowed` / `STATUS_STACK_BUFFER_OVERRUN`). See [`window-gdi.md`](window-gdi.md) (Title bar hit-testing) and [`ui-views.md`](ui-views.md) (History scrollbar).
 
 ## Related docs
 

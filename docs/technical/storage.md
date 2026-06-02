@@ -14,7 +14,7 @@ TrayVault/
 ├── trayvault.log
 ├── config.toml          # settings (hand-rolled TOML subset)
 └── blobs/
-    └── <hex-sha256>.dib # raw BGRA pixel bytes
+    └── <hex-sha256>.dib # TVB1 header + WIC payload (PNG/JPEG), or legacy raw BGRA
 ```
 
 ## Metadata (`entries.dat`)
@@ -48,9 +48,11 @@ After capture, image entries hold decoded BGRA bytes in `ClipEntry::image_pixels
 
 ## Blob store
 
-- Content-addressed by lowercase hex SHA-256 (`ImageRef.hash`)
-- `write_blob` skips if the file already exists (dedup by hash)
-- Orphan cleanup: `enqueue_prune_orphans` removes `.dib` files not referenced by current entries
+- Content-addressed by lowercase hex SHA-256 (`ImageRef.hash`) over **decoded BGRA** bytes (unchanged)
+- On-disk format: **`TVB1` + WIC payload** (PNG default, JPEG optional) or legacy raw BGRA for pre-0.2.0 files — see [`compressed-blob-storage.md`](compressed-blob-storage.md)
+- `write_blob` skips if the file already exists (dedup by hash); encodes with current `image_blob_codec` on first write, or writes **legacy raw BGRA** when WIC encode fails (see [`compressed-blob-storage.md`](compressed-blob-storage.md))
+- `read_blob(hash, w, h)` decodes TVB1 via WIC or reads legacy raw; always returns top-down BGRA
+- Orphan cleanup: `enqueue_prune_orphans` removes `.dib` files not referenced by current entries (accepts both TVB1 and legacy)
 - **Shared blobs:** because blobs are content-addressed, two entries with identical image content reference the same `.dib`. This is reachable with `deduplicate_global = false` (the default), where only consecutive duplicates are suppressed. `enqueue_prune_orphans` is reference-safe (it diffs against all referenced hashes). Direct deletes use `App::enqueue_removed_entry_delete` — see [`blob-reference-counting.md`](blob-reference-counting.md).
 
 ## Worker thread
@@ -59,14 +61,14 @@ Single background thread (`trayvault-store`) receives jobs via `mpsc`:
 
 | Job | Purpose |
 |-----|---------|
-| `PersistAll` | Write image blobs from job snapshot `image_pixels` (present on capture enqueue only), then atomic metadata rewrite |
+| `PersistAll` | WIC-encode image blobs from job snapshot `image_pixels` using `BlobWriteConfig` (codec + JPEG quality), then atomic metadata rewrite |
 | `DeleteEntry` | Remove a blob when an entry is deleted and no other entry references the hash |
 | `PruneOrphans` | Delete unreferenced blobs under `blobs/` |
 
 Public API:
 
 - `Store::load_initial()` — load history at startup, spawn worker
-- `Store::enqueue_persist(&[ClipEntry])` — queue full persist after history changes
+- `Store::enqueue_persist(&[ClipEntry], BlobWriteConfig)` — queue full persist after history changes
 - Failures are logged only; in-memory state is retained; next change retries
 
 ## Related

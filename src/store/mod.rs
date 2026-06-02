@@ -12,15 +12,20 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
+use crate::config::BlobWriteConfig;
 use crate::hash::hash_to_hex;
 use crate::log;
 use crate::models::ClipEntry;
+use crate::win32::wic;
 
 pub use meta::LoadResult;
 
 /// Jobs processed by the storage worker thread.
 enum Job {
-    PersistAll(Vec<ClipEntry>),
+    PersistAll {
+        entries: Vec<ClipEntry>,
+        blob_config: BlobWriteConfig,
+    },
     DeleteEntry {
         entry_id: u64,
         image_hash: Option<String>,
@@ -71,8 +76,11 @@ impl Store {
     }
 
     /// Queue a full metadata rewrite and blob writes for in-memory image pixels.
-    pub fn enqueue_persist(&self, entries: &[ClipEntry]) {
-        self.send_job(Job::PersistAll(entries.to_vec()));
+    pub fn enqueue_persist(&self, entries: &[ClipEntry], blob_config: BlobWriteConfig) {
+        self.send_job(Job::PersistAll {
+            entries: entries.to_vec(),
+            blob_config,
+        });
     }
 
     /// Queue deletion of an entry's image blob (metadata rewrite is separate).
@@ -88,9 +96,14 @@ impl Store {
         self.send_job(Job::PruneOrphans(entries.to_vec()));
     }
 
-    /// Load blob pixels on demand (safe to call from any thread).
-    pub fn read_blob(&self, hash: &str) -> Option<Vec<u8>> {
-        blobs::read_blob(&self.data_dir, hash)
+    /// Load decoded BGRA blob pixels on demand (safe to call from any thread).
+    pub fn read_blob(&self, hash: &str, width: u32, height: u32) -> Option<Vec<u8>> {
+        read_blob_at(&self.data_dir, hash, width, height)
+    }
+
+    /// Data directory root (`%LOCALAPPDATA%\\TrayVault` or test temp dir).
+    pub fn data_dir_path(&self) -> &Path {
+        &self.data_dir
     }
 
     fn send_job(&self, job: Job) {
@@ -102,8 +115,8 @@ impl Store {
     }
 
     /// Block until queued jobs finish (call before process exit).
-    pub fn flush(&self, entries: &[ClipEntry]) {
-        self.enqueue_persist(entries);
+    pub fn flush(&self, entries: &[ClipEntry], blob_config: BlobWriteConfig) {
+        self.enqueue_persist(entries, blob_config);
         let (tx, rx) = mpsc::channel();
         self.send_job(Job::Ping(tx));
         if rx.recv().is_err() {
@@ -122,6 +135,31 @@ impl Store {
     }
 }
 
+/// Load decoded BGRA blob pixels from a data directory (worker / UI threads).
+pub(crate) fn read_blob_at(
+    data_dir: &Path,
+    hash: &str,
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    blobs::read_blob(data_dir, hash, width, height)
+}
+
+#[cfg(test)]
+pub(crate) fn write_blob_for_test(
+    data_dir: &Path,
+    hash: &str,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> crate::error::Result<()> {
+    let config = BlobWriteConfig {
+        codec: crate::config::ImageBlobCodec::Png,
+        jpeg_quality: 90,
+    };
+    blobs::write_blob(data_dir, hash, width, height, pixels, &config)
+}
+
 #[cfg(test)]
 impl Store {
     pub fn open_for_test(data_dir: PathBuf) -> Self {
@@ -130,10 +168,17 @@ impl Store {
 }
 
 fn worker_loop(data_dir: PathBuf, rx: mpsc::Receiver<Job>) {
+    if let Err(err) = wic::ensure_com_initialized() {
+        log::error(&format!("storage worker COM init failed: {err}"));
+    }
+
     for job in rx {
         match job {
-            Job::PersistAll(entries) => {
-                if let Err(err) = persist_all(&data_dir, &entries) {
+            Job::PersistAll {
+                entries,
+                blob_config,
+            } => {
+                if let Err(err) = persist_all(&data_dir, &entries, blob_config) {
                     log::error(&format!("persist failed: {err}"));
                 }
             }
@@ -162,7 +207,11 @@ fn worker_loop(data_dir: PathBuf, rx: mpsc::Receiver<Job>) {
     }
 }
 
-fn persist_all(data_dir: &Path, entries: &[ClipEntry]) -> crate::error::Result<()> {
+fn persist_all(
+    data_dir: &Path,
+    entries: &[ClipEntry],
+    blob_config: BlobWriteConfig,
+) -> crate::error::Result<()> {
     for entry in entries {
         if let (Some(image), Some(pixels)) = (&entry.image, entry.image_pixels.as_ref()) {
             let expected = hash_to_hex(entry.hash);
@@ -172,7 +221,14 @@ fn persist_all(data_dir: &Path, entries: &[ClipEntry]) -> crate::error::Result<(
                     entry.id, image.hash
                 ));
             }
-            blobs::write_blob(data_dir, &image.hash, pixels)?;
+            blobs::write_blob(
+                data_dir,
+                &image.hash,
+                image.width,
+                image.height,
+                pixels,
+                &blob_config,
+            )?;
         }
     }
     meta::write_entries_atomic(data_dir, entries)
@@ -181,6 +237,7 @@ fn persist_all(data_dir: &Path, entries: &[ClipEntry]) -> crate::error::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{BlobWriteConfig, ImageBlobCodec};
     use crate::hash::{hash_text, hash_to_hex};
     use crate::models::{EntryKind, ImageRef};
     use std::fs;
@@ -202,6 +259,10 @@ mod tests {
 
     #[test]
     fn integration_persist_and_reload() {
+        if !crate::win32::wic::wic_codecs_available() {
+            log::warn("skip integration_persist_and_reload: WIC unavailable");
+            return;
+        }
         let dir = temp_data_dir("integration");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("mkdir");
@@ -226,14 +287,21 @@ mod tests {
         };
 
         let store = Store::open_for_test(dir.clone());
-        store.enqueue_persist(std::slice::from_ref(&entry));
+        let blob_config = BlobWriteConfig {
+            codec: ImageBlobCodec::Png,
+            jpeg_quality: 90,
+        };
+        store.enqueue_persist(std::slice::from_ref(&entry), blob_config);
         wait_for(|| meta::entries_path(&dir).exists());
 
         let loaded = meta::load_entries(&dir);
         assert_eq!(loaded.entries.len(), 1);
         assert_eq!(loaded.entries[0].kind, EntryKind::Image);
         assert_eq!(loaded.entries[0].image, entry.image);
-        assert_eq!(blobs::read_blob(&dir, &hash_to_hex(digest)), Some(pixels));
+        assert_eq!(
+            blobs::read_blob(&dir, &hash_to_hex(digest), 1, 1),
+            Some(pixels)
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -258,7 +326,13 @@ mod tests {
         };
 
         let store = Store::open_for_test(dir.clone());
-        store.enqueue_persist(std::slice::from_ref(&entry));
+        store.enqueue_persist(
+            std::slice::from_ref(&entry),
+            BlobWriteConfig {
+                codec: ImageBlobCodec::Png,
+                jpeg_quality: 90,
+            },
+        );
         wait_for(|| meta::entries_path(&dir).exists());
 
         let loaded = meta::load_entries(&dir);

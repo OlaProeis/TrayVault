@@ -1,8 +1,10 @@
 //! Vertical history scrollbar geometry, fade visibility, and NC hit-test helpers.
 
 use crate::app::App;
-use crate::ui::history::{build_list_layout, entry_inner_width, total_content_height, EntryLayout};
-use crate::ui::search::{content_viewport_height, header_total_height, refresh_display_indices};
+use crate::ui::history::{
+    entry_inner_width, refresh_list_layout, total_content_height, EntryLayout,
+};
+use crate::ui::search::{content_viewport_height, header_total_height};
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{fill_rect, rgba_to_color, Pixmap};
 use crate::ui::UiState;
@@ -10,8 +12,7 @@ use crate::win32::ffi::GetTickCount;
 
 /// Right-edge hit zone (wider than the visible thumb for hover reveal).
 pub const GUTTER_W: f32 = 12.0;
-pub const THUMB_W: f32 = 4.0;
-const THUMB_MARGIN: f32 = 2.0;
+pub const THUMB_W: f32 = 8.0;
 const MIN_THUMB_H: f32 = 24.0;
 
 pub const VISIBLE_HOLD_MS: u32 = 1000;
@@ -85,7 +86,8 @@ pub fn layout_from_heights(
     let thumb_travel = (viewport_h - thumb_h).max(0.0);
     let max_scroll = (content_height - viewport_h).max(1.0);
     let thumb_y = content_top + (scroll_offset / max_scroll) * thumb_travel;
-    let thumb_x = client_w - THUMB_MARGIN - THUMB_W;
+    let gutter_x = client_w - GUTTER_W;
+    let thumb_x = gutter_x + (GUTTER_W - THUMB_W) / 2.0;
 
     Some(ScrollbarLayout {
         track_top: content_top,
@@ -94,7 +96,7 @@ pub fn layout_from_heights(
         thumb_y,
         thumb_w: THUMB_W,
         thumb_h,
-        gutter_x: client_w - GUTTER_W,
+        gutter_x,
         gutter_w: GUTTER_W,
         max_scroll,
     })
@@ -107,15 +109,9 @@ pub fn layout_for_list(
     client_w: f32,
     client_h: f32,
 ) -> Option<(Vec<EntryLayout>, ScrollbarLayout)> {
-    refresh_display_indices(app, ui);
     let thumb_max_w = entry_inner_width(client_w);
-    let layouts = build_list_layout(
-        &ui.display_indices,
-        &app.entries,
-        thumb_max_w,
-        &mut ui.glyph_cache,
-        &ui.expanded_text_entries,
-    );
+    refresh_list_layout(app, ui, thumb_max_w);
+    let layouts = ui.cached_list_layout.clone();
     let content_height = total_content_height(&layouts);
     let content_top = header_total_height();
     let viewport_h = content_viewport_height(client_h);

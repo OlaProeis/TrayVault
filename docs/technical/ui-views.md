@@ -42,13 +42,13 @@ Filtered display order: pinned entries first (MRU among pinned), then unpinned. 
 | Constant | Value | Role |
 |----------|-------|------|
 | `GUTTER_W` | 12px | Hit zone for hover reveal and track clicks (wider than the visible thumb) |
-| `THUMB_W` | 4px | Visible thumb width |
+| `THUMB_W` | 8px | Visible thumb width (centered in gutter, 2px inset each side) |
 | `VISIBLE_HOLD_MS` | 1000 | Full opacity after wheel/drag/gutter hover |
 | `FADE_MS` | 300 | Fade-out duration before hidden |
 
 **Auto-hide:** Hidden by default. `UiState::touch_scrollbar()` extends `scrollbar_visible_until` (GetTickCount) on wheel scroll, gutter hover, and thumb drag. [`render.rs`](../../src/ui/render.rs) draws the thumb only when opacity &gt; 0; mid-fade repaints are scheduled from `on_paint` in [`main.rs`](../../src/main.rs).
 
-**Drag:** `LButtonDown` on the thumb sets `scrollbar_drag_grab_y`; `MouseMove` maps Y → `scroll_offset`. Track click (gutter, not thumb) pages ~90% of the viewport. `scrollbar_suppress_click` prevents accidental row copy on release.
+**Drag:** `LButtonDown` on the thumb sets `scrollbar_drag_grab_y` and calls `SetCapture(hwnd)` so moves outside the client area still update scroll. `MouseMove` maps Y → `scroll_offset`. Track click (gutter, not thumb) pages ~90% of the viewport. `LButtonUp` clears grab state only — **do not** call `ReleaseCapture()` from input handlers; it sends `WM_CAPTURECHANGED` synchronously and re-enters `WndProc` while `RefCell` borrows are active (same failure mode as `SendMessage(SC_MOVE)`). Windows releases capture on button-up; external capture loss is handled via deferred `WM_CAPTURECHANGED` in [`window.rs`](../../src/win32/window.rs) (`InputEvent::CaptureLost`). `scrollbar_suppress_click` prevents accidental row copy on release.
 
 **Resize conflict:** The thumb sits in the right 6px resize strip. [`window.rs`](../../src/win32/window.rs) `on_nc_client_override` returns `HTCLIENT` for the gutter over the scroll track (corners keep resize grips). `UiState::last_content_height` from the last paint feeds NC hit-test without rebuilding layout.
 
@@ -65,7 +65,7 @@ Hover highlight and row hit-testing must share **identical card bounds** — the
 
 [`draw_history_list`](../../src/ui/history.rs) calls `card(..., layout.height - 4.0)`; [`hit_test_entry`](../../src/ui/history.rs) must pass the same `content_x`, `content_w`, and height. Do **not** hit-test the full layout row (`h = layout.height`, full client width) — that leaves a 4px band below each card where the cursor is still “over” the row but paint shows no hover, so highlight **lags behind** when moving up until `HoverKey` finally changes.
 
-**Repaint:** [`handle_input`](../../src/ui/input.rs) `MouseMove` on the main view (no settings/help/preview overlay) always sets `needs_repaint` — hover is resolved from `ui.mouse_x/y` during paint, so every move must repaint even when `HoverKey` is unchanged (e.g. entering the card from the row dead zone within the same entry).
+**Repaint:** [`handle_input`](../../src/ui/input.rs) `MouseMove` on the main view compares [`HoverKey`](../../src/ui/mod.rs) before/after `hover_key_at`; unchanged key skips `InvalidateRect` (card hit-test bounds match draw, so moving within one card does not need extra frames). Still repaints when the scrollbar gutter is hit (reveal/fade), when `HoverKey` changes (card, filter chip, settings, close), or on settings/help/preview overlays.
 
 **Regression fixed (2026):** Full-row hit test + `HoverKey`-gated repaint caused sticky highlight on the row below when moving the cursor upward.
 
@@ -76,18 +76,18 @@ List previews are **scale-to-fit** inside the card’s inner width (client width
 | Constant | Value | Role |
 |----------|-------|------|
 | `entry_inner_width()` | derived | Max width passed into scale/layout (`content_w − 20`) |
-| `MAX_THUMB_WIDTH` | 800px | Hard cap on displayed thumbnail width |
-| `MAX_THUMB_HEIGHT` | 520px | Hard cap on displayed thumbnail height (pairs with width for ~16:9) |
+| `MAX_THUMB_WIDTH` | 1200px | Hard cap on displayed thumbnail width |
+| `MAX_THUMB_HEIGHT` | 900px | Hard cap on displayed thumbnail height |
 | `IMAGE_THUMB_MAX_HEIGHT` | 120px | Minimum fit-box height on narrow windows |
-| Fit box height | `max(120, inner_w × 0.65)` capped at 520 | Grows with window until height cap binds |
+| Fit box height | `max(120, inner_w × 0.85)` capped at 900 | Grows with window until height cap binds |
 
-Scale: `min(box_w / img_w, box_h / img_h)` (upscale allowed). Example 1354×910 at inner_w ≈ 800 → ~772×520 display pixels. Pixel filter: bilinear (`scale_bilinear_rgba` in [`pixmap.rs`](../../src/ui/pixmap.rs)).
+Scale: `min(box_w / img_w, box_h / img_h)` (upscale allowed). Example 1817×1476 at inner_w ≈ 856 → ~856×695 display pixels (full card width). Pixel filter: bilinear (`scale_bilinear_rgba` in [`pixmap.rs`](../../src/ui/pixmap.rs)).
 
 **Cache ([`thumb_cache.rs`](../../src/ui/thumb_cache.rs)):** `ThumbCache::get()` consults `(entry_id, dst_w, dst_h)` without reading pixels or disk. On a miss, full-resolution **BGRA** pixels (from `image_pixels` or a one-time blob load) are converted to RGBA, downscaled once via bilinear filtering into a `Pixmap`, and stored in `UiState::thumb_cache`. Subsequent repaints (e.g. mouse-move) blit from cache and skip blob I/O. Cache clears when `set_width_bucket()` sees a new integer `thumb_max_w` (window resize). Do not key by entry id alone — cap changes would reuse stale small bitmaps.
 
 **Preview modal** ([`preview.rs`](../../src/ui/preview.rs)): scale-to-fit over the full client area (not the list caps above). On cache miss: BGRA → RGBA, bilinear downscale, store in `UiState::preview_cache` (`PreviewImageCache`); cache hits 1:1 `blit` the pre-scaled pixmap. Pixels from `image_pixels` or `Store::read_blob` on miss. Cache clears on Esc (`input.rs`). See [`ui-perf-caches.md`](ui-perf-caches.md).
 
-**Perf:** `UiState::glyph_cache` persists across paints (text not re-rasterized every frame) and is reused for input hit-tests (`hit_test_filter_chip`, `hit_test_context_menu`, `caret_at_click` in [`input.rs`](../../src/ui/input.rs)) so mouse-move hover does not cold-rasterize chip/menu labels every frame. `preview_cache` avoids per-frame decode/scale while the modal is open. Main-view `MouseMove` repaints every frame so card hover stays in sync with the cursor (see **History card hover**). [`HoverKey`](../../src/ui/mod.rs) is still updated for header/filter targets but does not gate repaints. Avoid `SendMessageW(SC_MOVE)` during input — see [`window-gdi.md`](window-gdi.md) title bar.
+**Perf:** `UiState::glyph_cache` persists across paints (text not re-rasterized every frame) and is reused for input hit-tests (`hit_test_filter_chip`, `hit_test_context_menu`, `caret_at_click` in [`input.rs`](../../src/ui/input.rs)) so mouse-move hover does not cold-rasterize chip/menu labels every frame. `preview_cache` avoids per-frame decode/scale while the modal is open. Main-view `MouseMove` gates repaints on `HoverKey` change (see **History card hover** and [`ui-perf-caches.md`](ui-perf-caches.md)). Avoid re-entrant Win32 calls during input (`SendMessageW(SC_MOVE)`, `ReleaseCapture()`) — see [`window-gdi.md`](window-gdi.md) and [`message-loop-callbacks.md`](message-loop-callbacks.md).
 
 ## Widgets
 
@@ -175,6 +175,7 @@ All / Text / Images / Pinned — **`hit_test_filter_chip()`** on mouse-up update
 | Input | Action |
 |-------|--------|
 | ↑ / ↓ | Move selection on **filtered** list; clamp scroll |
+| Page Up / Page Down | Scroll history by one visible list viewport (does not move selection) |
 | Enter | Copy selected entry |
 | Esc | Clear search, or hide window if search empty; dismiss overlays |
 | Delete | Search focused → forward-delete or delete selection; else delete selected entry |
@@ -182,7 +183,7 @@ All / Text / Images / Pinned — **`hit_test_filter_chip()`** on mouse-up update
 | Ctrl+A | Search focused → select all in query |
 | Ctrl+P | Toggle pin |
 | F1 / Shift+? | Toggle help overlay |
-| Mouse move | Update cursor; repaint every frame on main view (card hover); overlays always repaint on move |
+| Mouse move | Update cursor; repaint on main view when `HoverKey` changes or scrollbar gutter hit; overlays always repaint on move |
 | **Mouse down (left)** | Dismiss context menu if press is outside it (keep menu open for item clicks) |
 | **Mouse up (left)** | Search field → focus + caret (client `LButtonUp`, or synthetic from `WM_NCLBUTTONUP` when search uses caption drag); filter chip → change filter; history row → copy entry; context menu item → action; settings gear → open settings |
 | Double-click image | Open preview modal |
